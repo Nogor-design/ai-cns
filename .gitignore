@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+
+# Cortex per-repo artifacts: state.md is meant to be tracked; last_brief.md is transient.
+.cortex/last_brief.md
+.cortex/runs/
+.cortex/digests/
+
+# Local databases
+*.db
+
+# IDE
+.idea/

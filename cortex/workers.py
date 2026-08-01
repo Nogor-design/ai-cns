@@ -1,0 +1,169 @@
+"""Headless CLI worker adapters.
+
+Commands are argument arrays and execute without a shell. Full task briefs use
+stdin where supported so private context is not exposed in process listings.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import ollama_client
+
+
+class WorkerError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    worker: str
+    argv: tuple[str, ...]
+    uses_stdin: bool
+
+    @property
+    def display(self) -> str:
+        return subprocess.list2cmdline(list(self.argv))
+
+
+@dataclass(frozen=True)
+class WorkerResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+    usage: dict[str, object] | None
+
+
+def available(worker: str) -> bool:
+    if worker == "ollama":
+        return ollama_client.available()
+    return worker != "perplexity" and shutil.which(_executable(worker)) is not None
+
+
+def build_command(
+    *,
+    worker: str,
+    model: str,
+    action: str,
+    workspace: str | Path,
+    brief_path: str | Path,
+    budget: str,
+) -> CommandSpec:
+    workspace = str(workspace)
+    brief_path = str(brief_path)
+    write = action == "implement"
+
+    if worker == "codex":
+        argv = [
+            "codex", "exec", "--json", "--sandbox",
+            "workspace-write" if write else "read-only", "-C", workspace,
+        ]
+        if model and model != "default":
+            argv.extend(["--model", model])
+        argv.append("-")
+        return CommandSpec(worker, tuple(argv), True)
+
+    if worker == "claude":
+        argv = [
+            "claude", "-p", "--output-format", "json", "--permission-mode",
+            "acceptEdits" if write else "plan", "--max-turns", _max_turns(budget),
+            "--no-session-persistence",
+        ]
+        if model and model != "default":
+            argv.extend(["--model", model])
+        return CommandSpec(worker, tuple(argv), True)
+
+    if worker == "gemini":
+        argv = [
+            "gemini", "-p", "Follow the complete task brief provided on stdin.",
+            "--output-format", "json", "--approval-mode",
+            "auto_edit" if write else "plan", "--sandbox",
+        ]
+        if model and model != "default":
+            argv.extend(["--model", model])
+        return CommandSpec(worker, tuple(argv), True)
+
+    if worker == "grok":
+        argv = [
+            "grok", "--no-auto-update", "--prompt-file", brief_path,
+            "--output-format", "json", "--permission-mode",
+            "acceptEdits" if write else "plan", "--cwd", workspace,
+        ]
+        if model and model != "default":
+            argv.extend(["--model", model])
+        return CommandSpec(worker, tuple(argv), False)
+
+    if worker == "ollama":
+        return CommandSpec(worker, ("ollama", "run", model or "phi4:14b"), True)
+
+    if worker == "perplexity":
+        raise WorkerError(
+            "Perplexity is configured as a manual/API research worker; no CLI was found."
+        )
+    raise WorkerError(f"unknown worker: {worker}")
+
+
+def execute(
+    spec: CommandSpec,
+    *,
+    workspace: str | Path,
+    brief: str,
+    timeout: int,
+) -> WorkerResult:
+    if spec.worker == "ollama":
+        try:
+            response = ollama_client.generate(
+                brief, model=spec.argv[-1], timeout=float(timeout)
+            )
+        except ollama_client.OllamaUnavailable as exc:
+            raise WorkerError(str(exc)) from exc
+        return WorkerResult(exit_code=0, stdout=response, stderr="", usage=None)
+    if not available(spec.worker):
+        raise WorkerError(f"worker command is not available: {_executable(spec.worker)}")
+    try:
+        proc = subprocess.run(
+            list(spec.argv),
+            cwd=str(workspace),
+            input=brief if spec.uses_stdin else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise WorkerError(str(exc)) from exc
+    return WorkerResult(
+        exit_code=proc.returncode,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        usage=_extract_usage(proc.stdout),
+    )
+
+
+def _extract_usage(output: str) -> dict[str, object] | None:
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ("stats", "usage", "modelUsage"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _max_turns(budget: str) -> str:
+    return {"local": "2", "small": "3", "medium": "6", "large": "10"}.get(
+        budget, "3"
+    )
+
+
+def _executable(worker: str) -> str:
+    return worker

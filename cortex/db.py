@@ -1,0 +1,150 @@
+"""SQLite schema and connection management for Cortex-Lite.
+
+Single file, zero config (spec section 4). The canonical project state lives as
+a git-tracked markdown file inside each repo; this database indexes and links to
+it rather than owning it. Model performance is a VIEW over `runs`, never a stored
+table, so it can never go stale.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from . import config
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    repo_path     TEXT NOT NULL,
+    stack         TEXT,
+    status        TEXT NOT NULL DEFAULT 'active',   -- active | paused | archived
+    program       TEXT NOT NULL DEFAULT 'general',
+    priority      INTEGER NOT NULL DEFAULT 3,       -- 1 (highest) .. 5 (lowest)
+    privacy       TEXT NOT NULL DEFAULT 'internal', -- public | internal | restricted
+    current_goal  TEXT,
+    test_command  TEXT,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id),
+    title          TEXT NOT NULL,
+    type           TEXT NOT NULL DEFAULT 'other',   -- code|review|research|docs|data|planning|other
+    status         TEXT NOT NULL DEFAULT 'open',    -- open|in_progress|done|abandoned
+    brief          TEXT,
+    execution_mode TEXT,                            -- agentic_cli|api|manual
+    model          TEXT,
+    risk           TEXT NOT NULL DEFAULT 'auto',    -- auto | low | medium | high
+    complexity     INTEGER,                         -- optional 0..10 override
+    acceptance     TEXT,
+    allowed_paths  TEXT,                            -- JSON array or newline-delimited text
+    budget         TEXT,                            -- local | small | medium | large
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id             TEXT PRIMARY KEY,
+    task_id        TEXT NOT NULL REFERENCES tasks(id),
+    project_id     TEXT NOT NULL REFERENCES projects(id),
+    model          TEXT,
+    execution_mode TEXT,
+    started_at     TEXT NOT NULL,
+    ended_at       TEXT,
+    git_before     TEXT,
+    git_after      TEXT,
+    files_changed  TEXT,        -- JSON array
+    diff_size      INTEGER,
+    tests_passed   INTEGER,     -- 1 | 0 | NULL
+    outcome        TEXT,        -- survived | reverted | unknown
+    response       TEXT,
+    captured_via   TEXT,        -- git | api | manual
+    human_note     TEXT,
+    workspace_path TEXT,
+    command_json   TEXT,
+    usage_json     TEXT,
+    exit_code      INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    ts          TEXT NOT NULL,
+    decision    TEXT NOT NULL,
+    rationale   TEXT,
+    source      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
+CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
+CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id);
+
+-- Model history for decision support: computed, never stored (spec section 4).
+-- Recreate it on connect so additive outcome semantics reach older databases.
+DROP VIEW IF EXISTS model_task_history;
+CREATE VIEW model_task_history AS
+SELECT runs.project_id            AS project_id,
+       tasks.type                 AS task_type,
+       runs.model                 AS model,
+       COUNT(*)                   AS attempts,
+       SUM(runs.tests_passed = 1) AS tests_passed,
+       SUM(runs.outcome IN ('survived', 'accepted')) AS survived,
+       AVG(runs.diff_size)        AS avg_diff_size,
+       MAX(runs.started_at)       AS last_used
+FROM runs JOIN tasks ON runs.task_id = tasks.id
+GROUP BY runs.project_id, tasks.type, runs.model;
+"""
+
+
+# Existing Cortex databases predate the portfolio/dispatcher fields. SQLite's
+# CREATE TABLE IF NOT EXISTS does not add columns, so keep a tiny additive
+# migration map here. All fields are nullable or have safe defaults.
+_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "projects": {
+        "program": "TEXT NOT NULL DEFAULT 'general'",
+        "priority": "INTEGER NOT NULL DEFAULT 3",
+        "privacy": "TEXT NOT NULL DEFAULT 'internal'",
+    },
+    "tasks": {
+        "risk": "TEXT NOT NULL DEFAULT 'auto'",
+        "complexity": "INTEGER",
+        "acceptance": "TEXT",
+        "allowed_paths": "TEXT",
+        "budget": "TEXT",
+    },
+    "runs": {
+        "workspace_path": "TEXT",
+        "command_json": "TEXT",
+        "usage_json": "TEXT",
+        "exit_code": "INTEGER",
+    },
+}
+
+
+def _apply_additive_migrations(conn: sqlite3.Connection) -> None:
+    """Add portfolio fields to databases created by Cortex-Lite 1.0."""
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        existing = {
+            row[1] for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        }
+        for name, declaration in columns.items():
+            if name not in existing:
+                conn.execute(
+                    f'ALTER TABLE "{table}" ADD COLUMN "{name}" {declaration}'
+                )
+
+
+def connect(path: str | Path | None = None) -> sqlite3.Connection:
+    """Open a connection with sane defaults and the schema applied."""
+    target = Path(path) if path is not None else config.db_path()
+    conn = sqlite3.connect(str(target))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(SCHEMA)
+    _apply_additive_migrations(conn)
+    conn.commit()
+    return conn
