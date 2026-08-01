@@ -19,13 +19,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from . import config, db, dispatcher, health, ids, pm, routing, store, workers
+from . import config, db, dispatcher, git_monitor, health, ids, pm, routing, store, team, workers
 
 WORKER_NAMES = ("codex", "claude", "gemini", "grok", "ollama", "perplexity")
 ACTIVE_TASK_STATUSES = {"open", "assigned", "in_progress", "running", "review", "blocked"}
 TASK_MUTABLE_FIELDS = {
     "title", "type", "status", "brief", "risk", "complexity", "acceptance",
-    "allowed_paths", "budget", "priority", "assignee", "due_at",
+    "allowed_paths", "budget", "priority", "assignee", "requested_model", "effort", "due_at",
 }
 PROJECT_MUTABLE_FIELDS = {
     "status", "program", "priority", "privacy", "state_mode", "current_goal",
@@ -48,6 +48,7 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             conn, include_paused=True, live_git=False
         )
     }
+    git_checks = {row["project_id"]: _row_dict(row) for row in store.list_git_checks(conn)}
     task_rows = [
         row for row in store.list_all_tasks(conn, include_done=False)
         if row["project_id"] in projects_by_id
@@ -56,6 +57,26 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         row for row in store.list_suggestions(conn, status="proposed")
         if row["project_id"] in projects_by_id
     ]
+    run_rows = conn.execute(
+        """SELECT runs.*, tasks.title AS task_title, tasks.status AS task_status,
+                  projects.name AS project_name
+           FROM runs
+           JOIN tasks ON tasks.id = runs.task_id
+           JOIN projects ON projects.id = runs.project_id
+           ORDER BY runs.started_at DESC
+           LIMIT 30"""
+    ).fetchall()
+    run_payloads: list[dict[str, Any]] = []
+    latest_run_by_task: dict[str, dict[str, Any]] = {}
+    for run in run_rows:
+        item = _row_dict(run)
+        item["state"] = (
+            "running" if not run["ended_at"]
+            else "failed" if run["exit_code"] not in {None, 0}
+            else "completed"
+        )
+        run_payloads.append(item)
+        latest_run_by_task.setdefault(run["task_id"], item)
 
     task_payloads: list[dict[str, Any]] = []
     project_task_index: dict[str, list[dict[str, Any]]] = {
@@ -74,6 +95,14 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         item["route"] = asdict(route)
         item["recommended_worker"] = route.worker
         item["recommended_model"] = route.model
+        assigned_worker = str(task["assignee"] or "").lower()
+        item["execution_worker"] = assigned_worker or route.worker
+        item["execution_model"] = (
+            task["requested_model"]
+            or (route.model if not assigned_worker or assigned_worker == route.worker else "default")
+        )
+        item["execution_effort"] = task["effort"] or route.effort
+        item["latest_run"] = latest_run_by_task.get(task["id"])
         task_payloads.append(item)
         project_task_index[task["project_id"]].append(item)
         if task["assignee"]:
@@ -99,6 +128,22 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             test_command=project["test_command"],
             updated_at=project["updated_at"],
         )
+        item["git_check"] = git_checks.get(project["id"])
+        if item["git_check"]:
+            checked = item["git_check"]
+            item.update(
+                is_git=bool(checked["is_git"]),
+                branch=checked["branch"],
+                modified=checked["modified"],
+                untracked=checked["untracked"],
+                ahead=checked["ahead"],
+                behind=checked["behind"],
+                last_commit_date=checked["last_commit_date"],
+                last_commit_sha=checked["last_commit_sha"],
+                last_commit_subject=checked["last_commit_subject"],
+                git_status_available=True,
+                git_status_note=checked["note"],
+            )
         active_tasks = project_task_index[project["id"]]
         item["tasks"] = active_tasks
         item["suggestions"] = project_suggestion_index[project["id"]]
@@ -152,7 +197,35 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             if task["status"] in {"review", "blocked"}
             or str(task["assignee"] or "").lower() in {"owner", "perplexity"}
         ),
+        "running_runs": sum(1 for run in run_payloads if run["state"] == "running"),
+        "recent_runs": len(run_payloads),
+        "git_dirty": sum(
+            1 for project in project_payloads
+            if project["status"] == "active" and project["modified"] + project["untracked"] > 0
+        ),
+        "git_ahead": sum(
+            1 for project in project_payloads
+            if project["status"] == "active" and (project["ahead"] or 0) > 0
+        ),
+        "git_behind": sum(
+            1 for project in project_payloads
+            if project["status"] == "active" and (project["behind"] or 0) > 0
+        ),
+        "git_unchecked": sum(
+            1 for project in project_payloads
+            if project["status"] == "active" and not project["git_check"]
+        ),
+        "git_no_upstream": sum(
+            1 for project in project_payloads
+            if project["status"] == "active" and project["git_check"]
+            and project["is_git"] and project["git_check"]["fetched"]
+            and project["ahead"] is None and project["behind"] is None
+        ),
     }
+
+    expert_payloads = team.team_payload(conn, task_payloads, run_payloads)
+    usage = team.usage_totals(run_payloads)
+    summary["tracked_tokens"] = usage["total_tokens"]
 
     worker_payloads = []
     for name in WORKER_NAMES:
@@ -176,7 +249,11 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "projects": project_payloads,
         "tasks": task_payloads,
         "suggestions": suggestion_payloads,
+        "runs": run_payloads,
         "workers": worker_payloads,
+        "team": expert_payloads,
+        "usage": usage,
+        "model_performance": team.performance_payload(conn),
         "focus": pm.portfolio_focus(conn),
     }
 
@@ -233,6 +310,14 @@ class CortexDashboardServer(ThreadingHTTPServer):
             job = self._jobs.get(job_id)
             return dict(job) if job else None
 
+    def list_jobs(self) -> list[dict[str, Any]]:
+        with self._jobs_lock:
+            return sorted(
+                (dict(job) for job in self._jobs.values()),
+                key=lambda job: job["created_at"],
+                reverse=True,
+            )[:30]
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server: CortexDashboardServer
@@ -248,6 +333,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             self._json(HTTPStatus.OK, {"ok": True, "database": str(self.server.database_path)})
+            return
+        if path == "/api/jobs":
+            self._json(HTTPStatus.OK, {"jobs": self.server.list_jobs()})
             return
         parts = [part for part in unquote(path).split("/") if part]
         if len(parts) == 3 and parts[:2] == ["api", "jobs"]:
@@ -282,6 +370,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     allow_cloud=bool(body.get("allow_cloud", False)),
                 )
                 self._json(HTTPStatus.ACCEPTED, {"job_id": job_id, "focus": focus})
+                return
+            if path == "/api/git/refresh":
+                job_id = self._start_git_job(fetch=bool(body.get("fetch", False)))
+                self._json(HTTPStatus.ACCEPTED, {"job_id": job_id})
+                return
+            if path == "/api/team/keep-working":
+                limit = int(body.get("limit", 3))
+                with db.connect(self.server.database_path) as conn:
+                    task_ids = team.safe_start_candidates(conn, limit=limit)
+                job_ids = [
+                    self._start_dispatch_job(
+                        task_id, allow_write=False, approve_high_risk=False
+                    )
+                    for task_id in task_ids
+                ]
+                self._json(
+                    HTTPStatus.ACCEPTED,
+                    {"started": len(job_ids), "task_ids": task_ids, "job_ids": job_ids},
+                )
                 return
             if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "plan":
                 with db.connect(self.server.database_path) as conn:
@@ -409,6 +516,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return payload
 
         return self.server.start_job("dispatch", target)
+
+    def _start_git_job(self, *, fetch: bool) -> str:
+        database_path = self.server.database_path
+
+        def target() -> dict[str, Any]:
+            with db.connect(database_path) as conn:
+                rows = git_monitor.refresh_portfolio(conn, fetch=fetch)
+                return {"checked": len(rows), "fetched": fetch}
+
+        return self.server.start_job("git", target)
 
     def _body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))

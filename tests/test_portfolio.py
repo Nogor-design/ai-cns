@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cortex import config, dispatcher, evidence, health, routing, store, workers, worktrees
+from cortex import config, dispatcher, evidence, git_monitor, health, routing, store, workers, worktrees
 
 
 def test_additive_migration_upgrades_old_database(tmp_path):
@@ -48,9 +48,9 @@ def test_additive_migration_upgrades_old_database(tmp_path):
     assert {"program", "priority", "privacy", "state_mode"} <= project_columns
     assert {
         "risk", "complexity", "acceptance", "allowed_paths", "budget",
-        "priority", "assignee", "due_at",
+        "priority", "assignee", "requested_model", "effort", "due_at",
     } <= task_columns
-    assert {"workspace_path", "command_json", "usage_json", "exit_code"} <= run_columns
+    assert {"workspace_path", "command_json", "usage_json", "effort", "exit_code"} <= run_columns
 
 
 def test_health_detects_dirty_repo(conn, project, git_repo):
@@ -104,6 +104,19 @@ def test_routing_escalates_production_billing(conn, project):
     assert route.requires_approval is True
 
 
+def test_routing_uses_grok_for_adversarial_review(conn, project):
+    tid = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="Adversarially review routing blind spots",
+        type="review",
+        acceptance="Rank five failure modes",
+    )
+    route = routing.route_task(project, store.get_task(conn, tid))
+    assert route.worker == "grok"
+    assert route.effort in {"low", "medium", "high", "xhigh"}
+
+
 @pytest.mark.parametrize("worker", ["codex", "claude", "gemini", "grok", "ollama"])
 def test_worker_commands_do_not_embed_full_brief(worker, tmp_path):
     spec = workers.build_command(
@@ -115,6 +128,35 @@ def test_worker_commands_do_not_embed_full_brief(worker, tmp_path):
         budget="small",
     )
     assert "TOP SECRET TASK BODY" not in spec.display
+
+
+def test_worker_commands_include_supported_effort(tmp_path):
+    codex = workers.build_command(
+        worker="codex", model="default", action="review", workspace=tmp_path,
+        brief_path=tmp_path / "brief.md", budget="small", effort="high",
+    )
+    claude = workers.build_command(
+        worker="claude", model="default", action="review", workspace=tmp_path,
+        brief_path=tmp_path / "brief.md", budget="small", effort="medium",
+    )
+    assert "model_reasoning_effort" in codex.display
+    assert "--effort medium" in claude.display
+
+
+def test_jsonl_usage_capture():
+    stdout = '\n'.join([
+        '{"type":"message"}',
+        '{"type":"result","usage":{"input_tokens":120,"output_tokens":30}}',
+    ])
+    assert workers._extract_usage(stdout) == {"input_tokens": 120, "output_tokens": 30}
+
+
+def test_git_monitor_persists_snapshot(conn, project):
+    rows = git_monitor.refresh_portfolio(conn, fetch=False)
+    assert rows[0]["project_id"] == project["id"]
+    stored = store.list_git_checks(conn)
+    assert stored[0]["project_id"] == project["id"]
+    assert stored[0]["is_git"] == 1
 
 
 def test_worktree_refuses_dirty_canonical_repo(git_repo):
@@ -206,12 +248,13 @@ def test_ollama_worker_uses_local_http_api(monkeypatch, tmp_path):
 
     def fake_generate(prompt, *, model, timeout):
         captured.update(prompt=prompt, model=model, timeout=timeout)
-        return "clean response"
+        return "clean response", {"input_tokens": 4, "output_tokens": 2}
 
-    monkeypatch.setattr(workers.ollama_client, "generate", fake_generate)
+    monkeypatch.setattr(workers.ollama_client, "generate_with_usage", fake_generate)
     spec = workers.CommandSpec("ollama", ("ollama", "run", "phi4:14b"), True)
     result = workers.execute(spec, workspace=tmp_path, brief="hello", timeout=30)
     assert result.stdout == "clean response"
+    assert result.usage == {"input_tokens": 4, "output_tokens": 2}
     assert captured == {"prompt": "hello", "model": "phi4:14b", "timeout": 30.0}
 
 

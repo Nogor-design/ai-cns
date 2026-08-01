@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,10 +39,49 @@ class WorkerResult:
     usage: dict[str, object] | None
 
 
+_PROBE_CACHE: dict[str, tuple[float, dict[str, str | None]]] = {}
+
+
 def available(worker: str) -> bool:
     if worker == "ollama":
         return ollama_client.available()
     return worker != "perplexity" and shutil.which(_executable(worker)) is not None
+
+
+def probe(worker: str, *, max_age: float = 300) -> dict[str, str | None]:
+    cached = _PROBE_CACHE.get(worker)
+    if cached and time.monotonic() - cached[0] < max_age:
+        return dict(cached[1])
+    if worker == "perplexity":
+        result = {"availability": "manual", "note": "No local CLI configured"}
+    elif not available(worker):
+        result = {"availability": "missing", "note": "CLI command not found"}
+    elif worker in {"codex", "claude", "grok"}:
+        auth_command = {
+            "codex": ["codex", "login", "status"],
+            "claude": ["claude", "auth", "status"],
+            "grok": ["grok", "models"],
+        }[worker]
+        try:
+            proc = subprocess.run(
+                auth_command, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=6,
+            )
+            combined = f"{proc.stdout}\n{proc.stderr}".lower()
+            auth_failed = proc.returncode != 0 or any(
+                marker in combined
+                for marker in ("not authenticated", '"loggedin": false', "not logged in")
+            )
+            result = {
+                "availability": "needs_auth" if auth_failed else "ready",
+                "note": f"{worker.title()} CLI needs sign-in" if auth_failed else None,
+            }
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            result = {"availability": "unavailable", "note": str(exc)}
+    else:
+        result = {"availability": "ready", "note": None}
+    _PROBE_CACHE[worker] = (time.monotonic(), result)
+    return dict(result)
 
 
 def build_command(
@@ -52,16 +92,20 @@ def build_command(
     workspace: str | Path,
     brief_path: str | Path,
     budget: str,
+    effort: str | None = None,
 ) -> CommandSpec:
     workspace = str(workspace)
     brief_path = str(brief_path)
     write = action == "implement"
 
     if worker == "codex":
-        argv = [
-            "codex", "exec", "--json", "--sandbox",
+        argv = ["codex", "exec"]
+        if effort:
+            argv.extend(["--config", f'model_reasoning_effort="{effort}"'])
+        argv.extend([
+            "--json", "--sandbox",
             "workspace-write" if write else "read-only", "-C", workspace,
-        ]
+        ])
         if model and model != "default":
             argv.extend(["--model", model])
         argv.append("-")
@@ -75,6 +119,8 @@ def build_command(
         ]
         if model and model != "default":
             argv.extend(["--model", model])
+        if effort:
+            argv.extend(["--effort", effort])
         return CommandSpec(worker, tuple(argv), True)
 
     if worker == "gemini":
@@ -95,6 +141,8 @@ def build_command(
         ]
         if model and model != "default":
             argv.extend(["--model", model])
+        if effort:
+            argv.extend(["--reasoning-effort", effort])
         return CommandSpec(worker, tuple(argv), False)
 
     if worker == "ollama":
@@ -116,12 +164,12 @@ def execute(
 ) -> WorkerResult:
     if spec.worker == "ollama":
         try:
-            response = ollama_client.generate(
+            response, usage = ollama_client.generate_with_usage(
                 brief, model=spec.argv[-1], timeout=float(timeout)
             )
         except ollama_client.OllamaUnavailable as exc:
             raise WorkerError(str(exc)) from exc
-        return WorkerResult(exit_code=0, stdout=response, stderr="", usage=None)
+        return WorkerResult(exit_code=0, stdout=response, stderr="", usage=usage)
     if not available(spec.worker):
         raise WorkerError(f"worker command is not available: {_executable(spec.worker)}")
     try:
@@ -146,16 +194,24 @@ def execute(
 
 
 def _extract_usage(output: str) -> dict[str, object] | None:
+    objects: list[dict[str, object]] = []
     try:
-        data = json.loads(output)
+        parsed = json.loads(output)
+        if isinstance(parsed, dict):
+            objects.append(parsed)
     except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    for key in ("stats", "usage", "modelUsage"):
-        value = data.get(key)
-        if isinstance(value, dict):
-            return value
+        for line in output.splitlines():
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                objects.append(parsed)
+    for data in reversed(objects):
+        for key in ("stats", "usage", "modelUsage"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                return value
     return None
 
 

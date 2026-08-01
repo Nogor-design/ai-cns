@@ -26,6 +26,11 @@ _CURRENT_RESEARCH = re.compile(
     r"\b(latest|current|pricing|competitor|market research|law|regulation|news)\b",
     re.IGNORECASE,
 )
+_ADVERSARIAL = re.compile(
+    r"\b(adversarial(?:ly)?|challenge|critique|counterargument|blind spots?|red[- ]team|"
+    r"break the plan|devil'?s advocate|alternative hypothesis)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,7 @@ class Route:
     model: str
     action: str
     budget: str
+    effort: str
     reviewer: str | None
     requires_approval: bool
     reasons: tuple[str, ...]
@@ -87,15 +93,21 @@ def route_task(project: sqlite3.Row, task: sqlite3.Row) -> Route:
     budget = task["budget"] or (
         "local" if score <= 2 else "small" if score <= 4 else "medium" if score <= 7 else "large"
     )
+    requested_effort = task["effort"] if "effort" in task.keys() else None
+    effort = requested_effort or (
+        "low" if score <= 2 else "medium" if score <= 5 else "high" if score <= 7 else "xhigh"
+    )
+    requested_model = task["requested_model"] if "requested_model" in task.keys() else None
 
     if task["type"] == "research" and _CURRENT_RESEARCH.search(text):
         return Route(
             risk=risk,
             complexity=score,
             worker="perplexity",
-            model="search",
+            model=requested_model or "search",
             action="research",
             budget=budget,
+            effort=effort,
             reviewer="codex",
             requires_approval=risk == "high",
             reasons=tuple(reasons + ["current web research needs sourced retrieval"]),
@@ -106,12 +118,27 @@ def route_task(project: sqlite3.Row, task: sqlite3.Row) -> Route:
             risk=risk,
             complexity=score,
             worker="codex",
-            model="default",
+            model=requested_model or "default",
             action="implement" if task["type"] == "code" else "review",
             budget=budget,
+            effort=effort,
             reviewer="claude",
             requires_approval=True,
             reasons=tuple(reasons + ["high-risk/high-complexity work uses premium integration"]),
+        )
+
+    if _ADVERSARIAL.search(text) and task["type"] in {"review", "research", "planning"}:
+        return Route(
+            risk=risk,
+            complexity=score,
+            worker="grok",
+            model=requested_model or "default",
+            action="review",
+            budget=budget,
+            effort=effort,
+            reviewer="codex",
+            requires_approval=False,
+            reasons=tuple(reasons + ["adversarial critique is assigned to Grok's specialist role"]),
         )
 
     if task["type"] == "code":
@@ -120,9 +147,10 @@ def route_task(project: sqlite3.Row, task: sqlite3.Row) -> Route:
                 risk=risk,
                 complexity=score,
                 worker="ollama",
-                model="qwen3-coder:30b",
+                model=requested_model or "qwen3-coder:30b",
                 action="draft",
                 budget="local",
+                effort=effort,
                 reviewer="codex",
                 requires_approval=False,
                 reasons=tuple(reasons + ["bounded code draft can start locally"]),
@@ -131,9 +159,10 @@ def route_task(project: sqlite3.Row, task: sqlite3.Row) -> Route:
             risk=risk,
             complexity=score,
             worker="gemini",
-            model="default",
+            model=requested_model or "default",
             action="implement",
             budget=budget,
+            effort=effort,
             reviewer="codex",
             requires_approval=False,
             reasons=tuple(reasons + ["medium implementation with Codex acceptance"]),
@@ -144,9 +173,10 @@ def route_task(project: sqlite3.Row, task: sqlite3.Row) -> Route:
             risk=risk,
             complexity=score,
             worker="claude",
-            model="sonnet",
+            model=requested_model or "sonnet",
             action="review",
             budget=budget,
+            effort=effort,
             reviewer="codex",
             requires_approval=False,
             reasons=tuple(reasons + ["architecture/planning benefits from an independent review"]),
@@ -156,9 +186,10 @@ def route_task(project: sqlite3.Row, task: sqlite3.Row) -> Route:
         risk=risk,
         complexity=score,
         worker="ollama",
-        model="phi4:14b",
+        model=requested_model or "phi4:14b",
         action="review",
         budget="local",
+        effort=effort,
         reviewer="codex" if task["type"] == "review" else None,
         requires_approval=False,
         reasons=tuple(reasons + ["low-risk first pass stays local"]),

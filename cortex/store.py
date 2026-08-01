@@ -17,6 +17,7 @@ EXECUTION_MODES = {"agentic_cli", "headless_cli", "api", "manual"}
 PROJECT_STATUSES = {"active", "paused", "archived"}
 PRIVACY_LEVELS = {"public", "internal", "restricted"}
 TASK_RISKS = {"auto", "low", "medium", "high"}
+EFFORT_LEVELS = {"low", "medium", "high", "xhigh"}
 TASK_STATUSES = {
     "open", "assigned", "in_progress", "running", "review", "blocked",
     "done", "abandoned",
@@ -116,6 +117,8 @@ def create_task(
     acceptance: str | None = None,
     allowed_paths: str | None = None,
     budget: str | None = None,
+    requested_model: str | None = None,
+    effort: str | None = None,
     priority: int = 3,
     assignee: str | None = None,
     due_at: str | None = None,
@@ -127,17 +130,21 @@ def create_task(
     if complexity is not None:
         complexity = max(0, min(10, complexity))
     priority = max(1, min(5, int(priority)))
+    if effort not in EFFORT_LEVELS:
+        effort = None
     tid = ids.short_id()
     ts = ids.now()
     conn.execute(
         """INSERT INTO tasks
            (id, project_id, title, type, status, brief, risk, complexity,
-            acceptance, allowed_paths, budget, priority, assignee, due_at,
+            acceptance, allowed_paths, budget, requested_model, effort,
+            priority, assignee, due_at,
             created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             tid, project_id, title, type, "open", brief, risk, complexity,
-            acceptance, allowed_paths, budget, priority, assignee, due_at, ts, ts,
+            acceptance, allowed_paths, budget, requested_model, effort,
+            priority, assignee, due_at, ts, ts,
         ),
     )
     conn.commit()
@@ -190,6 +197,8 @@ def update_task(conn: sqlite3.Connection, task_id: str, **fields: Any) -> None:
         raise ValueError(f"invalid task status: {fields['status']}")
     if "priority" in fields:
         fields["priority"] = max(1, min(5, int(fields["priority"])))
+    if "effort" in fields and fields["effort"] not in EFFORT_LEVELS | {None}:
+        raise ValueError(f"invalid effort: {fields['effort']}")
     fields["updated_at"] = ids.now()
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(
@@ -212,6 +221,7 @@ def create_suggestion(
     acceptance: str | None = None,
     allowed_paths: str | None = None,
     budget: str | None = None,
+    effort: str | None = None,
     priority: int = 3,
     recommended_worker: str | None = None,
     recommended_model: str | None = None,
@@ -228,18 +238,20 @@ def create_suggestion(
     if complexity is not None:
         complexity = max(0, min(10, int(complexity)))
     priority = max(1, min(5, int(priority)))
+    if effort not in EFFORT_LEVELS:
+        effort = None
     sid = ids.short_id()
     ts = ids.now()
     conn.execute(
         """INSERT INTO suggestions
            (id, project_id, title, type, status, why, brief, risk, complexity,
-            acceptance, allowed_paths, budget, priority, recommended_worker,
+            acceptance, allowed_paths, budget, effort, priority, recommended_worker,
             recommended_model, action, reviewer, requires_approval,
             source_worker, source_model, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             sid, project_id, title, type, "proposed", why, brief, risk,
-            complexity, acceptance, allowed_paths, budget, priority,
+            complexity, acceptance, allowed_paths, budget, effort, priority,
             recommended_worker, recommended_model, action, reviewer,
             int(requires_approval), source_worker, source_model, ts, ts,
         ),
@@ -292,7 +304,7 @@ def update_suggestion(
         raise ValueError(f"invalid suggestion status: {fields['status']}")
     allowed = {
         "title", "type", "status", "why", "brief", "risk", "complexity",
-        "acceptance", "allowed_paths", "budget", "priority", "task_id",
+        "acceptance", "allowed_paths", "budget", "effort", "priority", "task_id",
     }
     unexpected = set(fields) - allowed
     if unexpected:
@@ -324,6 +336,8 @@ def convert_suggestion(conn: sqlite3.Connection, suggestion_id: str) -> str:
         acceptance=suggestion["acceptance"],
         allowed_paths=suggestion["allowed_paths"],
         budget=suggestion["budget"],
+        requested_model=suggestion["recommended_model"],
+        effort=suggestion["effort"],
         priority=suggestion["priority"],
         assignee=suggestion["recommended_worker"],
     )
@@ -342,16 +356,17 @@ def create_run(
     execution_mode: str,
     git_before: str | None = None,
     captured_via: str | None = None,
+    effort: str | None = None,
 ) -> str:
     rid = ids.short_id()
     conn.execute(
         """INSERT INTO runs
            (id, task_id, project_id, model, execution_mode, started_at,
-            git_before, captured_via, outcome)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
+            git_before, captured_via, outcome, effort)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (
             rid, task_id, project_id, model, execution_mode, ids.now(),
-            git_before, captured_via, "unknown",
+            git_before, captured_via, "unknown", effort,
         ),
     )
     conn.commit()
@@ -438,3 +453,43 @@ def model_task_history(
         "SELECT * FROM model_task_history WHERE project_id = ? ORDER BY last_used DESC",
         (project_id,),
     ).fetchall()
+
+
+# ------------------------------------------------------------- Git checks ---
+def upsert_git_check(conn: sqlite3.Connection, project_id: str, **fields: Any) -> None:
+    values = {
+        "is_git": int(bool(fields.get("is_git", False))),
+        "branch": fields.get("branch"),
+        "modified": int(fields.get("modified", 0)),
+        "untracked": int(fields.get("untracked", 0)),
+        "ahead": fields.get("ahead"),
+        "behind": fields.get("behind"),
+        "last_commit_date": fields.get("last_commit_date"),
+        "last_commit_sha": fields.get("last_commit_sha"),
+        "last_commit_subject": fields.get("last_commit_subject"),
+        "fetched": int(bool(fields.get("fetched", False))),
+        "note": fields.get("note"),
+        "checked_at": fields.get("checked_at") or ids.now(),
+    }
+    conn.execute(
+        """INSERT INTO project_git_checks
+           (project_id, is_git, branch, modified, untracked, ahead, behind,
+            last_commit_date, last_commit_sha, last_commit_subject, fetched,
+            note, checked_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(project_id) DO UPDATE SET
+             is_git=excluded.is_git, branch=excluded.branch,
+             modified=excluded.modified, untracked=excluded.untracked,
+             ahead=excluded.ahead, behind=excluded.behind,
+             last_commit_date=excluded.last_commit_date,
+             last_commit_sha=excluded.last_commit_sha,
+             last_commit_subject=excluded.last_commit_subject,
+             fetched=excluded.fetched, note=excluded.note,
+             checked_at=excluded.checked_at""",
+        (project_id, *values.values()),
+    )
+    conn.commit()
+
+
+def list_git_checks(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM project_git_checks").fetchall()

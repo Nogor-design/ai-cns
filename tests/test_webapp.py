@@ -59,3 +59,53 @@ def test_portfolio_payload_exposes_recommendations_separately(conn, project):
     assert payload["suggestions"][0]["id"] == suggestion_id
     assert payload["projects"][0]["suggestion_count"] == 1
     assert payload["tasks"] == []
+
+
+def test_portfolio_payload_includes_latest_run_evidence(conn, project):
+    task_id = store.create_task(
+        conn, project_id=project["id"], title="Inspect the release", type="review"
+    )
+    run_id = store.create_run(
+        conn,
+        task_id=task_id,
+        project_id=project["id"],
+        model="codex:default",
+        execution_mode="headless_cli",
+    )
+    store.update_run(
+        conn,
+        run_id,
+        ended_at="2026-08-01T20:00:00Z",
+        exit_code=0,
+        response="Release evidence captured.",
+    )
+    store.update_task(conn, task_id, status="review")
+
+    payload = webapp.portfolio_payload(conn)
+    assert payload["runs"][0]["id"] == run_id
+    assert payload["runs"][0]["state"] == "completed"
+    assert payload["runs"][0]["model"] == "codex:default"
+    assert payload["tasks"][0]["latest_run"]["response"] == "Release evidence captured."
+
+
+def test_portfolio_payload_exposes_expert_team_and_execution_controls(conn, project):
+    task_id = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="Adversarially review the plan",
+        type="review",
+        assignee="grok",
+        requested_model="grok-4.5",
+        effort="medium",
+    )
+    store.update_task(conn, task_id, status="assigned")
+
+    payload = webapp.portfolio_payload(conn)
+    task = next(row for row in payload["tasks"] if row["id"] == task_id)
+    grok = next(row for row in payload["team"] if row["name"] == "grok")
+    assert task["execution_worker"] == "grok"
+    assert task["execution_model"] == "grok-4.5"
+    assert task["execution_effort"] == "medium"
+    assert grok["state"] in {"queued", "missing", "needs_auth"}
+    assert "usage" in payload
+    assert "model_performance" in payload

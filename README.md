@@ -9,8 +9,8 @@ See `AI-CNS-V1-MVP-Spec.md` for the original design.
 
 ## What works now
 
-1. **AI project-manager dashboard and daily focus** - one Continue action,
-   human-decision and agent-work queues, cached next-move suggestions,
+1. **AI project-manager dashboard and expert team** - one Continue action,
+   visible working/queued/idle agent states, cached next-move suggestions,
    recoverable paused/external projects, Git evidence, and clear ownership.
 2. **Context compiler** - creates a bounded model-ready brief and blocks known
    secrets or PII before it leaves the machine.
@@ -68,17 +68,31 @@ different local port with `-Port 8877`.
 
 The intended daily workflow is deliberately short:
 
-1. Click **Continue with AI**. Cortex first points to a review, blocked item,
+1. Start in **Your expert team**. Each CLI has a specialist role, current or
+   next assignment, model/effort, availability, run success, and captured token
+   usage. Click **Keep team moving** to start up to three already-approved,
+   read-only, low-risk assignments across otherwise idle experts.
+2. Click **Continue with AI**. Cortex first points to a review, blocked item,
    assigned run, or existing recommendation without spending an AI token.
-2. If a project has no actionable work, select it and click **Plan next moves**.
+3. If a project has no actionable work, select it and click its explicitly
+   named **Plan PROJECT** button.
    Smart mode asks the Codex CLI for three bounded proposals; Local mode asks
    Ollama. Plans are cached, and a deterministic no-token plan is used if the
    selected CLI is unavailable.
-3. Click **Approve & start** on one proposal. Cortex converts only that proposal
+4. Click **Approve & start** on one proposal. Cortex converts only that proposal
    into a task, assigns the routed worker, and starts read-only work. Code edits
    require one explicit confirmation and run in an isolated Git worktree.
-4. Return when the item appears in **Needs your decision**. Cortex never merges
+5. Follow **Execution activity** to see the actual worker, model/effort, start time, elapsed
+   time, completion state, exit code, and captured response. This evidence
+   survives a dashboard refresh.
+6. Use **Check GitHub** to refresh stored working-tree and remote ahead/behind
+   evidence. The scorecard learns success by model, effort, and task type.
+7. Return when the item appears in **Needs your decision**. Cortex never merges
    work or takes an external action automatically.
+
+The planner and executor are deliberately labeled separately. For example,
+Codex may propose a task that Cortex routes to Ollama for inexpensive local
+execution; the dashboard shows both roles instead of calling both “Codex.”
 
 Manual task entry remains under **More** for known one-off work; it is not the
 primary path.
@@ -88,8 +102,11 @@ The CLI mirrors the same loop:
 ```powershell
 cd D:\ai-cns
 .\scripts\cortex-portfolio.ps1 focus
+.\scripts\cortex-portfolio.ps1 team
+.\scripts\cortex-portfolio.ps1 keep-working
 .\scripts\cortex-portfolio.ps1 plan nt-strategy-forge --worker codex --allow-cloud
 .\scripts\cortex-portfolio.ps1 approve <suggestion-id> --start
+.\scripts\cortex-portfolio.ps1 git-check --fetch
 ```
 
 Use `--worker ollama` for a local plan. Use `--queue` instead of `--start` to
@@ -98,10 +115,10 @@ additional `--allow-write` flag and always uses an isolated worktree.
 Projects marked `restricted` use the local/no-token planner unless Codex access
 is explicitly approved with `--allow-cloud` (or the matching dashboard prompt).
 
-The fast web view reads branch and activity metadata without running a fleet of
-Git processes across large or shared repositories. Use the CLI `dashboard`
-command when you want a live dirty/ahead/behind probe; the web view labels that
-field as deferred instead of presenting stale data as clean.
+The web view reads persisted Git checks so it stays fast. **Check GitHub** (or
+`git-check --fetch`) refreshes dirty/ahead/behind evidence for active projects.
+Token totals include only per-run usage that a CLI reports to Cortex; provider
+subscription quotas are not universally exposed and are labeled accordingly.
 
 The `.cmd` wrapper is equivalent:
 

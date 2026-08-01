@@ -81,6 +81,7 @@ def preview(
             workspace=workspace,
             brief_path=brief_path,
             budget=route.budget,
+            effort=route.effort,
         )
         note = None
     except workers.WorkerError as exc:
@@ -139,6 +140,7 @@ def dispatch(
         workspace=workspace,
         brief_path=brief_path,
         budget=route.budget,
+        effort=route.effort,
     )
 
     before = gitutil.head(workspace) if gitutil.is_repo(workspace) else None
@@ -158,6 +160,7 @@ def dispatch(
         execution_mode="headless_cli",
         git_before=before,
         captured_via="cli",
+        effort=route.effort,
     )
     try:
         result = workers.execute(
@@ -248,8 +251,9 @@ def _with_overrides(
 ) -> routing.Route:
     values = route.__dict__.copy()
     if worker:
+        previous_worker = values["worker"]
         values["worker"] = worker
-        if not model:
+        if not model and previous_worker != worker:
             values["model"] = {
                 "codex": "default",
                 "claude": "sonnet",

@@ -99,6 +99,7 @@ def plan_project(
                 acceptance=item["acceptance"],
                 allowed_paths=item["allowed_paths"],
                 budget=item["budget"] or route.budget,
+                effort=route.effort,
                 priority=item["priority"],
                 recommended_worker=route.worker,
                 recommended_model=route.model,
@@ -190,6 +191,7 @@ def _ask_worker(
         workspace=project["repo_path"],
         brief_path=Path(project["repo_path"]) / ".cortex" / "pm-plan.md",
         budget="small",
+        effort="medium",
     )
     if worker == "codex":
         # PM planning does not need the user's interactive plugin/MCP stack.

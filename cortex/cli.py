@@ -25,6 +25,7 @@ from . import (
     config,
     db,
     dispatcher,
+    git_monitor,
     health,
     ids,
     pm as pm_mod,
@@ -32,6 +33,7 @@ from . import (
     runs as runs_mod,
     state as state_mod,
     store,
+    team,
     workers,
     webapp,
 )
@@ -414,9 +416,69 @@ def doctor():
     typer.echo(f"worktrees: {config.work_root()}")
     typer.echo(f"run logs:  {config.run_root()}")
     typer.echo("workers:")
-    for name in ("codex", "claude", "gemini", "grok", "ollama"):
-        typer.echo(f"  {name:<8} {'ready' if workers.available(name) else 'missing'}")
-    typer.echo("  perplexity manual/API (no local CLI configured)")
+    for name in ("codex", "claude", "gemini", "grok", "ollama", "perplexity"):
+        probe = workers.probe(name)
+        typer.echo(f"  {name:<11} {probe['availability']:<10} {probe.get('note') or ''}")
+
+
+@app.command("team")
+def team_command():
+    """Show each expert's role, availability, queue, and measured performance."""
+    conn = _conn()
+    payload = webapp.portfolio_payload(conn)
+    for member in payload["team"]:
+        current = member["current_task"]
+        typer.secho(
+            f"{member['name']:<11} {member['state']:<12} {member['role']}",
+            fg=typer.colors.CYAN if member["state"] == "working" else None,
+        )
+        if current:
+            typer.echo(
+                f"  next: {current['id']}  {current['title']} "
+                f"[{current.get('execution_model') or 'default'}, "
+                f"{current.get('execution_effort') or 'auto'} effort]"
+            )
+        else:
+            typer.echo(f"  {member.get('probe_note') or 'ready for a suitable assignment'}")
+        typer.echo(
+            f"  evidence: {member['attempts']} attempts; "
+            f"{member['success_rate'] if member['success_rate'] is not None else '-'}% success; "
+            f"{member['tokens']} tracked tokens"
+        )
+
+
+@app.command("git-check")
+def git_check(fetch: bool = typer.Option(True, "--fetch/--no-fetch")):
+    """Refresh stored Git working-tree and remote synchronization evidence."""
+    conn = _conn()
+    rows = git_monitor.refresh_portfolio(conn, fetch=fetch)
+    for row in rows:
+        state = "not-git" if not row["is_git"] else (
+            f"dirty={row['modified'] + row['untracked']} ahead={row['ahead']} behind={row['behind']}"
+        )
+        typer.echo(f"{row['project_id']:<24} {state}")
+
+
+@app.command("keep-working")
+def keep_working(
+    execute: bool = typer.Option(False, "--execute", help="Start safe queued assignments."),
+    limit: int = typer.Option(3, "--limit", min=1, max=6),
+):
+    """Preview or start one approved read-only assignment per available expert."""
+    conn = _conn()
+    task_ids = team.safe_start_candidates(conn, limit=limit)
+    if not task_ids:
+        typer.echo("No safe approved assignments are waiting. Run `cortex focus` or plan a project.")
+        return
+    for task_id in task_ids:
+        task = store.get_task(conn, task_id)
+        typer.echo(f"{task_id}  {task['assignee']}  {task['title']}")
+    if not execute:
+        typer.echo("preview only; add --execute to start these assignments")
+        return
+    for task_id in task_ids:
+        result = dispatcher.dispatch(conn, store.get_task(conn, task_id))
+        typer.echo(f"{result.run_id}  {result.worker}:{result.model}  {result.task_status}")
 
 
 # ---------------------------------------------------------- AI PM workflow ---
@@ -596,6 +658,7 @@ def route_command(task_id: str = typer.Argument(..., help="Task id.")):
     typer.echo(f"risk:       {route.risk}")
     typer.echo(f"complexity: {route.complexity}/10")
     typer.echo(f"worker:     {route.worker}:{route.model}")
+    typer.echo(f"effort:     {route.effort}")
     typer.echo(f"action:     {route.action}")
     typer.echo(f"budget:     {route.budget}")
     typer.echo(f"reviewer:   {route.reviewer or '-'}")
@@ -639,6 +702,7 @@ def dispatch(
     if not execute:
         typer.secho("DRY RUN — no worker started", fg=typer.colors.YELLOW)
         typer.echo(f"route:     {planned.route.worker}:{planned.route.model} ({planned.route.action})")
+        typer.echo(f"effort:    {planned.route.effort}")
         typer.echo(f"risk:      {planned.route.risk}; complexity {planned.route.complexity}/10")
         typer.echo(f"workspace: {planned.workspace}")
         typer.echo(f"command:   {planned.command.display if planned.command else planned.note}")
@@ -748,6 +812,8 @@ def task_add(
     budget: str = typer.Option(None, "--budget", help="local | small | medium | large."),
     priority: int = typer.Option(3, "--priority", min=1, max=5),
     assignee: str = typer.Option(None, "--assignee", help="Explicit worker or owner."),
+    model: str = typer.Option(None, "--model", help="Requested model for this assignment."),
+    effort: str = typer.Option(None, "--effort", help="low | medium | high | xhigh."),
     due_at: str = typer.Option(None, "--due", help="Optional ISO date or datetime."),
 ):
     """Create a task and print its id."""
@@ -769,6 +835,8 @@ def task_add(
         budget=budget,
         priority=priority,
         assignee=assignee,
+        requested_model=model,
+        effort=effort,
         due_at=due_at,
     )
     typer.secho(f"created task {tid}", fg=typer.colors.GREEN)

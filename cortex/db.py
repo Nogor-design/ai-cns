@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     acceptance     TEXT,
     allowed_paths  TEXT,                            -- JSON array or newline-delimited text
     budget         TEXT,                            -- local | small | medium | large
+    requested_model TEXT,                           -- optional explicit CLI model
+    effort          TEXT,                           -- low | medium | high | xhigh
     priority       INTEGER NOT NULL DEFAULT 3,       -- 1 (highest) .. 5 (lowest)
     assignee       TEXT,                            -- explicit worker or human owner
     due_at         TEXT,                            -- optional ISO date/datetime
@@ -70,6 +72,7 @@ CREATE TABLE IF NOT EXISTS runs (
     workspace_path TEXT,
     command_json   TEXT,
     usage_json     TEXT,
+    effort         TEXT,
     exit_code      INTEGER
 );
 
@@ -95,6 +98,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
     acceptance         TEXT,
     allowed_paths      TEXT,
     budget             TEXT,
+    effort             TEXT,
     priority           INTEGER NOT NULL DEFAULT 3,
     recommended_worker TEXT,
     recommended_model  TEXT,
@@ -106,6 +110,22 @@ CREATE TABLE IF NOT EXISTS suggestions (
     task_id            TEXT REFERENCES tasks(id),
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_git_checks (
+    project_id      TEXT PRIMARY KEY REFERENCES projects(id),
+    is_git          INTEGER NOT NULL DEFAULT 0,
+    branch          TEXT,
+    modified        INTEGER NOT NULL DEFAULT 0,
+    untracked       INTEGER NOT NULL DEFAULT 0,
+    ahead           INTEGER,
+    behind          INTEGER,
+    last_commit_date TEXT,
+    last_commit_sha TEXT,
+    last_commit_subject TEXT,
+    fetched         INTEGER NOT NULL DEFAULT 0,
+    note            TEXT,
+    checked_at      TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
@@ -151,12 +171,18 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "priority": "INTEGER NOT NULL DEFAULT 3",
         "assignee": "TEXT",
         "due_at": "TEXT",
+        "requested_model": "TEXT",
+        "effort": "TEXT",
     },
     "runs": {
         "workspace_path": "TEXT",
         "command_json": "TEXT",
         "usage_json": "TEXT",
         "exit_code": "INTEGER",
+        "effort": "TEXT",
+    },
+    "suggestions": {
+        "effort": "TEXT",
     },
 }
 
