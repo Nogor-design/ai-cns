@@ -30,6 +30,30 @@ def test_task_type_coerced(conn, project):
     assert store.get_task(conn, tid2)["type"] == "code"
 
 
+def test_task_assignment_controls_round_trip(conn, project):
+    tid = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="bounded review",
+        priority=1,
+        assignee="codex",
+        due_at="2026-08-05",
+    )
+    store.update_task(conn, tid, status="assigned", priority=2)
+    row = store.get_task(conn, tid)
+    assert row["assignee"] == "codex"
+    assert row["status"] == "assigned"
+    assert row["priority"] == 2
+    assert row["due_at"] == "2026-08-05"
+
+
+def test_list_all_tasks_includes_project_metadata(conn, project):
+    store.create_task(conn, project_id=project["id"], title="portfolio task")
+    row = store.list_all_tasks(conn)[0]
+    assert row["project_name"] == project["name"]
+    assert row["project_program"] == project["program"]
+
+
 def test_runs_json_files_changed(conn, project):
     tid = store.create_task(conn, project_id=project["id"], title="t", type="code")
     rid = store.create_run(

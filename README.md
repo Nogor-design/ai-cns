@@ -9,8 +9,10 @@ See `AI-CNS-V1-MVP-Spec.md` for the original design.
 
 ## What works now
 
-1. **Portfolio dashboard and daily digest** - Git cleanliness, upstream drift,
-   stale state, active/review/blocked tasks, program, priority, and privacy.
+1. **Local visual portfolio dashboard and daily digest** - project lanes,
+   recoverable paused/external projects, task assignments, automatic route
+   recommendations, worker availability, Git evidence, program, priority, and
+   privacy.
 2. **Context compiler** - creates a bounded model-ready brief and blocks known
    secrets or PII before it leaves the machine.
 3. **Rule-based routing** - recommends a worker, model tier, budget, action, and
@@ -46,6 +48,41 @@ cd D:\ai-cns
 .\scripts\cortex-portfolio.ps1 digest
 .\scripts\write-daily-digest.ps1
 ```
+
+## Open the visual dashboard
+
+The dashboard reads and writes the same local SQLite database as the CLI. It
+binds to `127.0.0.1`, never dispatches or merges work automatically, and keeps
+an explicit assignment separate from Cortex's recommendation.
+
+Double-click `scripts\start-cortex-dashboard.cmd`, or run:
+
+```powershell
+cd D:\ai-cns
+.\scripts\start-cortex-dashboard.ps1
+```
+
+The first launch installs the dashboard packages and creates a production
+build; later launches go straight to `http://127.0.0.1:8765`. Use `-Rebuild`
+after changing frontend source, `-NoOpen` to suppress browser launch, or a
+different local port with `-Port 8877`.
+
+Inside the dashboard you can:
+
+- switch between Overview, Strategy Analysis, monetization, infrastructure,
+  and Paused / External lanes;
+- open a project drawer for its goal, branch, tasks, routing rationale, and
+  local path;
+- add a bounded task with priority, risk, budget, and acceptance criteria;
+- accept the recommended worker or assign Codex, Claude, Gemini, Grok, Ollama,
+  Perplexity, or yourself;
+- move tasks through assigned, running, review, blocked, and done;
+- pause or reactivate a project without deleting its history.
+
+The fast web view reads branch and activity metadata without running a fleet of
+Git processes across large or shared repositories. Use the CLI `dashboard`
+command when you want a live dirty/ahead/behind probe; the web view labels that
+field as deferred instead of presenting stale data as clean.
 
 The `.cmd` wrapper is equivalent:
 

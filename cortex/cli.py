@@ -32,6 +32,7 @@ from . import (
     state as state_mod,
     store,
     workers,
+    webapp,
 )
 from .api_client import APIUnavailable
 
@@ -107,6 +108,7 @@ def init(
         program=program,
         priority=priority,
         privacy=privacy,
+        state_mode="tracked" if scaffold_state else "deferred",
         project_id=pid,
     )
     project = store.get_project(conn, pid)
@@ -341,7 +343,10 @@ def dashboard(
     """Show portfolio health, Git state, and task pressure."""
     conn = _conn()
     rows = health.inspect_portfolio(
-        conn, include_paused=all_projects, stale_days=stale_days
+        conn,
+        include_paused=all_projects,
+        include_archived=all_projects,
+        stale_days=stale_days,
     )
     if json_output:
         typer.echo(json.dumps([row.to_dict() for row in rows], indent=2))
@@ -377,7 +382,9 @@ def digest(
 ):
     """Produce the short daily decision digest."""
     conn = _conn()
-    rows = health.inspect_portfolio(conn, include_paused=all_projects)
+    rows = health.inspect_portfolio(
+        conn, include_paused=all_projects, include_archived=all_projects
+    )
     if json_output:
         payload = {
             "ready_for_review": [r.to_dict() for r in rows if r.review_tasks],
@@ -409,6 +416,18 @@ def doctor():
     for name in ("codex", "claude", "gemini", "grok", "ollama"):
         typer.echo(f"  {name:<8} {'ready' if workers.available(name) else 'missing'}")
     typer.echo("  perplexity manual/API (no local CLI configured)")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="Local bind address."),
+    port: int = typer.Option(8765, "--port", min=1, max=65535),
+    open_browser: bool = typer.Option(
+        True, "--open/--no-open", help="Open the dashboard in the default browser."
+    ),
+):
+    """Start the local Cortex Portfolio dashboard."""
+    webapp.serve(host=host, port=port, open_browser=open_browser)
 
 
 @app.command("route")
@@ -575,6 +594,9 @@ def task_add(
         None, "--allowed-paths", help="Comma/newline list or JSON array of allowed path globs."
     ),
     budget: str = typer.Option(None, "--budget", help="local | small | medium | large."),
+    priority: int = typer.Option(3, "--priority", min=1, max=5),
+    assignee: str = typer.Option(None, "--assignee", help="Explicit worker or owner."),
+    due_at: str = typer.Option(None, "--due", help="Optional ISO date or datetime."),
 ):
     """Create a task and print its id."""
     conn = _conn()
@@ -593,6 +615,9 @@ def task_add(
         acceptance=acceptance,
         allowed_paths=allowed_paths,
         budget=budget,
+        priority=priority,
+        assignee=assignee,
+        due_at=due_at,
     )
     typer.secho(f"created task {tid}", fg=typer.colors.GREEN)
     typer.echo(tid)
@@ -698,6 +723,9 @@ def task_update(
     acceptance: str = typer.Option(None, "--acceptance"),
     allowed_paths: str = typer.Option(None, "--allowed-paths"),
     budget: str = typer.Option(None, "--budget"),
+    priority: int = typer.Option(None, "--priority", min=1, max=5),
+    assignee: str = typer.Option(None, "--assignee"),
+    due_at: str = typer.Option(None, "--due"),
 ):
     """Update a task's routing controls or lifecycle state."""
     conn = _conn()
@@ -714,6 +742,9 @@ def task_update(
             "acceptance": acceptance,
             "allowed_paths": allowed_paths,
             "budget": budget,
+            "priority": priority,
+            "assignee": assignee,
+            "due_at": due_at,
         }.items()
         if value is not None
     }

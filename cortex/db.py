@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS projects (
     program       TEXT NOT NULL DEFAULT 'general',
     priority      INTEGER NOT NULL DEFAULT 3,       -- 1 (highest) .. 5 (lowest)
     privacy       TEXT NOT NULL DEFAULT 'internal', -- public | internal | restricted
+    state_mode    TEXT NOT NULL DEFAULT 'tracked',  -- tracked | deferred
     current_goal  TEXT,
     test_command  TEXT,
     updated_at    TEXT NOT NULL
@@ -42,6 +43,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     acceptance     TEXT,
     allowed_paths  TEXT,                            -- JSON array or newline-delimited text
     budget         TEXT,                            -- local | small | medium | large
+    priority       INTEGER NOT NULL DEFAULT 3,       -- 1 (highest) .. 5 (lowest)
+    assignee       TEXT,                            -- explicit worker or human owner
+    due_at         TEXT,                            -- optional ISO date/datetime
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
@@ -108,6 +112,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "program": "TEXT NOT NULL DEFAULT 'general'",
         "priority": "INTEGER NOT NULL DEFAULT 3",
         "privacy": "TEXT NOT NULL DEFAULT 'internal'",
+        "state_mode": "TEXT NOT NULL DEFAULT 'tracked'",
     },
     "tasks": {
         "risk": "TEXT NOT NULL DEFAULT 'auto'",
@@ -115,6 +120,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "acceptance": "TEXT",
         "allowed_paths": "TEXT",
         "budget": "TEXT",
+        "priority": "INTEGER NOT NULL DEFAULT 3",
+        "assignee": "TEXT",
+        "due_at": "TEXT",
     },
     "runs": {
         "workspace_path": "TEXT",

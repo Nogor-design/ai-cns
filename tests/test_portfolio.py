@@ -45,8 +45,11 @@ def test_additive_migration_upgrades_old_database(tmp_path):
     project_columns = {row[1] for row in upgraded.execute("pragma table_info(projects)")}
     task_columns = {row[1] for row in upgraded.execute("pragma table_info(tasks)")}
     run_columns = {row[1] for row in upgraded.execute("pragma table_info(runs)")}
-    assert {"program", "priority", "privacy"} <= project_columns
-    assert {"risk", "complexity", "acceptance", "allowed_paths", "budget"} <= task_columns
+    assert {"program", "priority", "privacy", "state_mode"} <= project_columns
+    assert {
+        "risk", "complexity", "acceptance", "allowed_paths", "budget",
+        "priority", "assignee", "due_at",
+    } <= task_columns
     assert {"workspace_path", "command_json", "usage_json", "exit_code"} <= run_columns
 
 
@@ -56,6 +59,12 @@ def test_health_detects_dirty_repo(conn, project, git_repo):
     assert row.health == "attention"
     assert row.untracked == 1
     assert any("dirty worktree" in warning for warning in row.warnings)
+
+
+def test_deferred_state_does_not_create_false_health_warning(conn, project):
+    store.update_project(conn, project["id"], state_mode="deferred")
+    row = health.inspect_project(conn, store.get_project(conn, project["id"]))
+    assert "missing .cortex/state.md" not in row.warnings
 
 
 def test_digest_renderer_has_decision_sections(conn, project):

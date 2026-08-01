@@ -17,6 +17,11 @@ EXECUTION_MODES = {"agentic_cli", "headless_cli", "api", "manual"}
 PROJECT_STATUSES = {"active", "paused", "archived"}
 PRIVACY_LEVELS = {"public", "internal", "restricted"}
 TASK_RISKS = {"auto", "low", "medium", "high"}
+TASK_STATUSES = {
+    "open", "assigned", "in_progress", "running", "review", "blocked",
+    "done", "abandoned",
+}
+STATE_MODES = {"tracked", "deferred"}
 
 
 class NotFound(LookupError):
@@ -35,21 +40,24 @@ def create_project(
     program: str = "general",
     priority: int = 3,
     privacy: str = "internal",
+    state_mode: str = "tracked",
     project_id: str | None = None,
 ) -> str:
     priority = max(1, min(5, priority))
     if privacy not in PRIVACY_LEVELS:
         privacy = "internal"
+    if state_mode not in STATE_MODES:
+        state_mode = "tracked"
     pid = project_id or ids.slugify(name)
     ts = ids.now()
     conn.execute(
         """INSERT INTO projects
            (id, name, repo_path, stack, status, program, priority, privacy,
-            current_goal, test_command, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            state_mode, current_goal, test_command, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             pid, name, repo_path, stack, "active", program, priority, privacy,
-            current_goal, test_command, ts,
+            state_mode, current_goal, test_command, ts,
         ),
     )
     conn.commit()
@@ -83,6 +91,8 @@ def update_project(conn: sqlite3.Connection, project_id: str, **fields: Any) -> 
         raise ValueError(f"invalid privacy level: {fields['privacy']}")
     if "priority" in fields:
         fields["priority"] = max(1, min(5, int(fields["priority"])))
+    if "state_mode" in fields and fields["state_mode"] not in STATE_MODES:
+        raise ValueError(f"invalid state mode: {fields['state_mode']}")
     fields["updated_at"] = ids.now()
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(
@@ -105,6 +115,9 @@ def create_task(
     acceptance: str | None = None,
     allowed_paths: str | None = None,
     budget: str | None = None,
+    priority: int = 3,
+    assignee: str | None = None,
+    due_at: str | None = None,
 ) -> str:
     if type not in TASK_TYPES:
         type = "other"
@@ -112,16 +125,18 @@ def create_task(
         risk = "auto"
     if complexity is not None:
         complexity = max(0, min(10, complexity))
+    priority = max(1, min(5, int(priority)))
     tid = ids.short_id()
     ts = ids.now()
     conn.execute(
         """INSERT INTO tasks
            (id, project_id, title, type, status, brief, risk, complexity,
-            acceptance, allowed_paths, budget, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            acceptance, allowed_paths, budget, priority, assignee, due_at,
+            created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             tid, project_id, title, type, "open", brief, risk, complexity,
-            acceptance, allowed_paths, budget, ts, ts,
+            acceptance, allowed_paths, budget, priority, assignee, due_at, ts, ts,
         ),
     )
     conn.commit()
@@ -149,6 +164,20 @@ def list_tasks(
     ).fetchall()
 
 
+def list_all_tasks(
+    conn: sqlite3.Connection, *, include_done: bool = False
+) -> list[sqlite3.Row]:
+    where = "" if include_done else "WHERE tasks.status NOT IN ('done', 'abandoned')"
+    return conn.execute(
+        f"""SELECT tasks.*, projects.name AS project_name,
+                   projects.program AS project_program,
+                   projects.status AS project_status
+            FROM tasks JOIN projects ON projects.id = tasks.project_id
+            {where}
+            ORDER BY tasks.priority, tasks.updated_at DESC"""
+    ).fetchall()
+
+
 def update_task(conn: sqlite3.Connection, task_id: str, **fields: Any) -> None:
     if not fields:
         return
@@ -156,6 +185,10 @@ def update_task(conn: sqlite3.Connection, task_id: str, **fields: Any) -> None:
         raise ValueError(f"invalid task risk: {fields['risk']}")
     if "complexity" in fields and fields["complexity"] is not None:
         fields["complexity"] = max(0, min(10, int(fields["complexity"])))
+    if "status" in fields and fields["status"] not in TASK_STATUSES:
+        raise ValueError(f"invalid task status: {fields['status']}")
+    if "priority" in fields:
+        fields["priority"] = max(1, min(5, int(fields["priority"])))
     fields["updated_at"] = ids.now()
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(
