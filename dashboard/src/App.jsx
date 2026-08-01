@@ -1,67 +1,35 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle,
-  BadgeDollarSign,
-  Bot,
-  CandlestickChart,
-  Check,
-  CheckCircle2,
-  ChevronRight,
-  CircleAlert,
-  CirclePlay,
-  Clock3,
-  Cloud,
-  Cpu,
-  FolderGit2,
-  GitBranch,
-  LayoutDashboard,
-  ListChecks,
-  LoaderCircle,
-  PauseCircle,
-  Plus,
-  RefreshCw,
-  RotateCcw,
-  Search,
-  ServerCog,
-  Telescope,
-  UserRound,
-  WandSparkles,
-  X,
+  AlertTriangle, Bot, Check, CheckCircle2, ChevronRight, CircleAlert,
+  CirclePlay, Clock3, Cpu, FolderGit2, GitBranch, LayoutDashboard,
+  LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
+  Search, Sparkles, Telescope, UserRound, WandSparkles, X,
 } from 'lucide-react'
 
-const navItems = [
-  ['overview', 'Overview', LayoutDashboard],
-  ['strategy-analysis', 'Strategy Analysis', Telescope],
-  ['trading-rd', 'Trading R&D', CandlestickChart],
-  ['monetization', 'Monetization', BadgeDollarSign],
-  ['infrastructure', 'Infrastructure', ServerCog],
-  ['paused', 'Paused / External', PauseCircle],
-]
-
 const workers = {
-  codex: { label: 'Codex', tone: 'emerald' },
-  claude: { label: 'Claude', tone: 'orange' },
-  gemini: { label: 'Gemini', tone: 'blue' },
-  grok: { label: 'Grok', tone: 'ink' },
-  ollama: { label: 'Ollama', tone: 'violet' },
-  perplexity: { label: 'Perplexity', tone: 'cyan' },
-  owner: { label: 'Owner', tone: 'slate' },
+  codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
+  gemini: { label: 'Gemini', tone: 'blue' }, grok: { label: 'Grok', tone: 'ink' },
+  ollama: { label: 'Ollama', tone: 'violet' }, perplexity: { label: 'Perplexity', tone: 'cyan' },
+  owner: { label: 'Owner', tone: 'slate' }, deterministic: { label: 'No-token plan', tone: 'slate' },
 }
 
-const statusOptions = ['open', 'assigned', 'in_progress', 'running', 'review', 'blocked', 'done']
+const navItems = [
+  ['overview', 'Today', LayoutDashboard], ['strategy-analysis', 'Strategy Analysis', Telescope],
+  ['paused', 'Paused / external', PauseCircle],
+]
+const statuses = ['open', 'assigned', 'in_progress', 'running', 'review', 'blocked', 'done']
 
 async function request(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-  })
+  const response = await fetch(path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } })
   const payload = await response.json()
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`)
   return payload
 }
 
-function prettyStatus(value) {
-  return String(value || 'open').replaceAll('_', ' ')
+function pretty(value) { return String(value || '').replaceAll('_', ' ') }
+function projectColor(project) {
+  const palette = ['#1b7468', '#8057a8', '#b55d42', '#4270a6', '#a67b2f', '#596b7c']
+  return palette[[...project.project_id].reduce((sum, char) => sum + char.charCodeAt(0), 0) % palette.length]
 }
 
 function relativeDate(value) {
@@ -76,336 +44,242 @@ function relativeDate(value) {
 }
 
 function WorkerBadge({ name, recommended = false }) {
-  const key = String(name || '').toLowerCase()
-  const worker = workers[key] || { label: name || 'Unassigned', tone: 'slate' }
-  return (
-    <span className={`worker-badge ${worker.tone}`}>
-      <Bot size={14} aria-hidden="true" />
-      <span>{worker.label}</span>
-      {recommended && <span className="recommended-mark">recommended</span>}
-    </span>
-  )
+  const worker = workers[String(name || '').toLowerCase()] || { label: name || 'Unassigned', tone: 'slate' }
+  return <span className={`worker-badge ${worker.tone}`}><Bot size={13} />{worker.label}{recommended && <em>recommended</em>}</span>
 }
 
-function StatusPill({ value }) {
-  return <span className={`status-pill status-${value}`}>{prettyStatus(value)}</span>
-}
+function StatusPill({ value }) { return <span className={`status-pill status-${value}`}>{pretty(value)}</span> }
+function Priority({ value }) { return <span className={`priority p${value}`}>P{value}</span> }
 
-function Priority({ value }) {
-  const labels = { 1: 'Critical', 2: 'High', 3: 'Medium', 4: 'Low', 5: 'Backlog' }
-  return <span className={`priority priority-${value}`}>{labels[value] || 'Medium'}</span>
-}
-
-function Sidebar({ active, onChange, pausedCount }) {
+function Sidebar({ data, active, onChange, selectedId, onSelect }) {
+  const activeProjects = data.projects.filter(project => project.status === 'active').sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name))
   return (
     <aside className="sidebar">
-      <div className="brand-mark" aria-label="Cortex Portfolio"><span /><span /><span /><span /></div>
+      <div className="wordmark"><span className="brand-mark"><i /><i /><i /><i /></span><div><strong>Cortex</strong><small>AI project manager</small></div></div>
       <nav aria-label="Portfolio views">
-        {navItems.map(([id, label, Icon]) => (
-          <button key={id} className={active === id ? 'active' : ''} onClick={() => onChange(id)}>
-            <Icon size={18} aria-hidden="true" />
-            <span>{label}</span>
-            {id === 'paused' && pausedCount > 0 && <em>{pausedCount}</em>}
+        {navItems.map(([id, label, Icon]) => <button key={id} className={active === id ? 'active' : ''} onClick={() => onChange(id)}><Icon size={17} /><span>{label}</span>{id === 'paused' && <em>{data.summary.paused_projects}</em>}</button>)}
+      </nav>
+      <div className="project-rail-title"><span>Active projects</span><em>{activeProjects.length}</em></div>
+      <div className="project-rail">
+        {activeProjects.map(project => (
+          <button key={project.project_id} className={selectedId === project.project_id ? 'selected' : ''} onClick={() => onSelect(project.project_id)}>
+            <span className="project-monogram" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span>
+            <span><strong>{project.name}</strong><small>{project.current_goal || 'Goal not set'}</small></span>
+            {(project.review_tasks || project.blocked_tasks) ? <em className="attention-count">{project.review_tasks + project.blocked_tasks}</em> : <ChevronRight size={14} />}
           </button>
         ))}
-      </nav>
-      <div className="sidebar-foot">
-        <span className="local-dot" />
-        <span>Local control plane</span>
       </div>
+      <div className="sidebar-foot"><span className="local-dot" /><span>Local-only control plane</span></div>
     </aside>
   )
 }
 
-function SummaryStrip({ summary }) {
-  const cells = [
-    ['Active projects', summary.active_projects, FolderGit2, 'teal'],
-    ['Needs review', summary.needs_review, ListChecks, summary.needs_review ? 'amber' : 'slate'],
-    ['Blocked', summary.blocked, CircleAlert, summary.blocked ? 'coral' : 'slate'],
-    ['Unassigned', summary.unassigned, UserRound, summary.unassigned ? 'amber' : 'slate'],
-    ['Local queue', summary.local_queue, Cpu, 'teal'],
-    ['Cloud queue', summary.cloud_queue, Cloud, 'blue'],
-  ]
+function Hero({ planner, setPlanner, onContinue, busy, onManual }) {
   return (
-    <section className="summary-strip" aria-label="Portfolio summary">
-      {cells.map(([label, value, Icon, tone]) => (
-        <div className="summary-cell" key={label}>
-          <span className={`summary-icon ${tone}`}><Icon size={17} /></span>
-          <span><small>{label}</small><strong>{value}</strong></span>
-        </div>
-      ))}
-    </section>
-  )
-}
-
-function ProjectTable({ projects, selectedId, onSelect }) {
-  if (!projects.length) {
-    return <div className="empty-state"><FolderGit2 size={24} /><strong>No projects in this view</strong><span>Choose another portfolio lane.</span></div>
-  }
-  return (
-    <div className="project-table-wrap">
-      <table className="project-table">
-        <thead><tr>
-          <th>Project</th><th>Status</th><th>Priority</th><th>Current objective</th>
-          <th>Git</th><th>Tasks</th><th>Assigned / recommended</th><th>Activity</th><th />
-        </tr></thead>
-        <tbody>
-          {projects.map(project => {
-            const assigned = project.assignees?.[0]
-            const recommended = project.recommendations?.[0]
-            return (
-              <tr key={project.project_id} className={selectedId === project.project_id ? 'selected' : ''} onClick={() => onSelect(project.project_id)}>
-                <td><span className="project-name"><span className={`health-dot ${project.health}`} />{project.name}</span><small>{project.program}</small></td>
-                <td><StatusPill value={project.status === 'active' ? (project.running_tasks ? 'running' : project.health) : project.status} /></td>
-                <td><Priority value={project.priority} /></td>
-                <td className="objective">{project.current_goal || 'Goal not set'}</td>
-                <td><span className="git-cell"><GitBranch size={13} />{project.branch || 'no git'}</span><small>{!project.git_status_available ? 'status deferred' : project.modified + project.untracked ? `${project.modified + project.untracked} changed` : 'clean'}</small></td>
-                <td><strong>{project.task_count}</strong><small>{project.review_tasks ? `${project.review_tasks} review` : 'active queue'}</small></td>
-                <td>{assigned ? <WorkerBadge name={assigned} /> : recommended ? <WorkerBadge name={recommended} recommended /> : <span className="muted">No queue</span>}</td>
-                <td>{relativeDate(project.last_commit_date || project.updated_at)}</td>
-                <td><ChevronRight size={16} /></td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-function TaskQueue({ tasks, onUpdate, focusRef }) {
-  const [mode, setMode] = useState('actionable')
-  const visible = tasks.filter(task => mode === 'assigned' ? task.assignee : !task.assignee)
-  return (
-    <section className="panel task-panel" ref={focusRef}>
-      <div className="panel-heading">
-        <div><h2>Task assignments</h2><p>Recommended routing stays separate from an explicit assignment.</p></div>
-        <div className="segmented">
-          <button className={mode === 'actionable' ? 'active' : ''} onClick={() => setMode('actionable')}>Recommended</button>
-          <button className={mode === 'assigned' ? 'active' : ''} onClick={() => setMode('assigned')}>Assigned</button>
-        </div>
-      </div>
-      <div className="task-list" role="list">
-        {visible.slice(0, 8).map(task => (
-          <div className="task-row" role="listitem" key={task.id}>
-            <span className={`task-state-dot state-${task.status}`} />
-            <div className="task-copy"><strong>{task.title}</strong><span>{task.project_name}</span></div>
-            <Priority value={task.priority} />
-            <div className="task-route">
-              <WorkerBadge name={task.assignee || task.recommended_worker} recommended={!task.assignee} />
-              <small>{task.route.reason || task.route.reasons?.at(-1)}</small>
-            </div>
-            <span className={`budget budget-${task.route.budget}`}>{task.route.budget}</span>
-            {!task.assignee ? (
-              <button className="inline-action" onClick={() => onUpdate(task.id, { assignee: task.recommended_worker, status: 'assigned' })}>Assign</button>
-            ) : (
-              <select aria-label={`Status for ${task.title}`} value={task.status} onChange={event => onUpdate(task.id, { status: event.target.value })}>
-                {statusOptions.map(option => <option key={option} value={option}>{prettyStatus(option)}</option>)}
-              </select>
-            )}
-          </div>
-        ))}
-        {!visible.length && <div className="compact-empty"><CheckCircle2 size={18} />Nothing waiting in this queue.</div>}
+    <section className="hero">
+      <div><span className="eyebrow">Your daily starting point</span><h1>Move the right project forward.</h1><p>Cortex finds the next decision or bounded task. You approve; the agents do the work.</p></div>
+      <div className="hero-actions">
+        <button className="continue-button" onClick={onContinue} disabled={busy}>{busy ? <LoaderCircle className="spin" size={20} /> : <Sparkles size={20} />}Continue with AI</button>
+        <div className="plan-mode"><span>Planner</span><button className={planner === 'codex' ? 'active' : ''} onClick={() => setPlanner('codex')}>Smart · Codex</button><button className={planner === 'ollama' ? 'active' : ''} onClick={() => setPlanner('ollama')}>Local · Ollama</button></div>
+        <details className="more-menu"><summary><MoreHorizontal size={16} />More</summary><button onClick={onManual}><Plus size={14} />Manual task</button></details>
       </div>
     </section>
   )
 }
 
-function WorkerCapacity({ workerRows }) {
+function DecisionLane({ tasks, projects, onSelect, onUpdate }) {
   return (
-    <section className="panel worker-panel">
-      <div className="panel-heading"><div><h2>Worker capacity</h2><p>CLI availability and live assignment load.</p></div></div>
-      <div className="worker-list">
-        {workerRows.map(worker => (
-          <div className="worker-row" key={worker.name}>
-            <WorkerBadge name={worker.name} />
-            <span className={`availability ${worker.availability}`}>{worker.availability}</span>
-            <strong>{worker.assigned}</strong><small>assigned</small>
-            <span className="rec-count">+{worker.recommended} recommended</span>
-          </div>
-        ))}
+    <section className="workflow-band decision-band" id="needs-decision">
+      <div className="band-heading"><span className="band-icon amber"><UserRound size={18} /></span><div><h2>Needs your decision <em>{tasks.length}</em></h2><p>Only the work that cannot safely continue without you.</p></div></div>
+      <div className="decision-list">
+        {tasks.slice(0, 4).map(task => <article key={task.id} data-task={task.id}>
+          <div><span className="project-kicker">{projects[task.project_id]?.name}</span><h3>{task.title}</h3><p>{String(task.assignee || '').toLowerCase() === 'owner' ? 'This task is assigned to you.' : task.status === 'blocked' ? 'This agent needs a decision or missing input.' : task.status === 'review' ? 'A completed result is ready for your review.' : 'This manual step needs your attention.'}</p></div>
+          <StatusPill value={task.status} />
+          <button onClick={() => onSelect(task.project_id)}>{task.status === 'review' ? 'Review' : 'Open'} <ChevronRight size={14} /></button>
+        </article>)}
+        {!tasks.length && <div className="lane-empty"><CheckCircle2 size={17} />Nothing is waiting on you.</div>}
       </div>
     </section>
   )
 }
 
-function DetailDrawer({ project, onClose, onTaskUpdate, onProjectUpdate, onAddTask }) {
+function WorkingLane({ tasks, projects, onStart, onSelect }) {
+  return (
+    <section className="workflow-band working-band" id="ai-working">
+      <div className="band-heading"><span className="band-icon teal"><Cpu size={18} /></span><div><h2>AI working <em>{tasks.length}</em></h2><p>Assigned work, in-flight runs, and the next safe starts.</p></div></div>
+      <div className="working-grid">
+        {tasks.slice(0, 5).map(task => <article key={task.id} data-task={task.id}>
+          <div className="working-top"><span className="project-monogram" style={{ '--project-color': projectColor(projects[task.project_id]) }}>{projects[task.project_id]?.name.slice(0, 2).toUpperCase()}</span><StatusPill value={task.status} /></div>
+          <span className="project-kicker">{projects[task.project_id]?.name}</span><h3>{task.title}</h3>
+          <div className="working-meta"><WorkerBadge name={task.assignee || task.recommended_worker} /><span>{task.route.budget} effort</span></div>
+          {task.status === 'assigned' && !['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()) ? <button className="soft-action" onClick={() => onStart(task)}>Start safely <CirclePlay size={15} /></button> : <button className="text-action" onClick={() => onSelect(task.project_id)}>Open project <ChevronRight size={14} /></button>}
+        </article>)}
+        {!tasks.length && <div className="lane-empty"><Clock3 size={17} />No agents are assigned yet.</div>}
+      </div>
+    </section>
+  )
+}
+
+function SuggestionCard({ suggestion, project, onApprove, onDismiss }) {
+  return (
+    <article className="suggestion-card" data-suggestion={suggestion.id}>
+      <div className="suggestion-top"><span className="project-kicker">{project?.name}</span><Priority value={suggestion.priority} /></div>
+      <h3>{suggestion.title}</h3><p className="why">{suggestion.why}</p>
+      <div className="acceptance"><Check size={14} /><span><strong>Done when</strong>{suggestion.acceptance}</span></div>
+      <div className="route-strip"><WorkerBadge name={suggestion.recommended_worker} recommended /><span>{pretty(suggestion.action)}</span><span>{suggestion.budget} effort</span></div>
+      <div className="card-actions"><button className="approve" onClick={() => onApprove(suggestion, true)}>Approve & start</button><button onClick={() => onApprove(suggestion, false)}>Queue</button><button className="icon-button" title="Dismiss suggestion" aria-label={`Dismiss ${suggestion.title}`} onClick={() => onDismiss(suggestion.id)}><X size={15} /></button></div>
+      <small className="source">Planned by {workers[suggestion.source_worker]?.label || suggestion.source_worker}</small>
+    </article>
+  )
+}
+
+function RecommendationLane({ suggestions, projects, onApprove, onDismiss, onPlan, planning }) {
+  return (
+    <section className="workflow-band recommendation-band" id="recommendations">
+      <div className="band-heading"><span className="band-icon violet"><WandSparkles size={18} /></span><div><h2>Recommended next moves <em>{suggestions.length}</em></h2><p>AI-proposed work is inert until you approve it.</p></div><button className="band-action" onClick={onPlan} disabled={planning}>{planning ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}Plan selected project</button></div>
+      <div className="recommendation-grid">
+        {suggestions.slice(0, 6).map(suggestion => <SuggestionCard key={suggestion.id} suggestion={suggestion} project={projects[suggestion.project_id]} onApprove={onApprove} onDismiss={onDismiss} />)}
+        {!suggestions.length && <div className="plan-empty"><WandSparkles size={22} /><div><strong>No plan is waiting.</strong><span>Pick a project, then let Codex or Ollama propose three bounded moves.</span></div><button onClick={onPlan} disabled={planning}>{planning ? 'Planning…' : 'Plan next moves'}</button></div>}
+      </div>
+    </section>
+  )
+}
+
+function ProjectsTable({ projects, selectedId, onSelect, onPlan }) {
+  return <section className="projects-section"><div className="section-title"><div><span className="eyebrow">Portfolio evidence</span><h2>Project workstreams</h2></div><span>{projects.length} visible</span></div><div className="project-table-wrap"><table><thead><tr><th>Project</th><th>Priority</th><th>Goal</th><th>Queue</th><th>Repository</th><th>Activity</th><th /></tr></thead><tbody>
+    {projects.map(project => <tr key={project.project_id} className={selectedId === project.project_id ? 'selected' : ''} onClick={() => onSelect(project.project_id)}><td><span className="project-cell"><span className="health-dot" data-health={project.health} />{project.name}</span><small>{project.program}</small></td><td><Priority value={project.priority} /></td><td>{project.current_goal || 'Goal not set'}</td><td><strong>{project.task_count}</strong><small>{project.suggestion_count} suggestions</small></td><td><span className="repo-state"><GitBranch size={13} />{project.branch || 'No Git'}</span><small>{project.git_status_available ? `${project.modified + project.untracked} changed` : 'status deferred'}</small></td><td>{relativeDate(project.updated_at)}</td><td><button className="table-plan" onClick={event => { event.stopPropagation(); onPlan(project.project_id) }}>Plan <Sparkles size={13} /></button></td></tr>)}
+  </tbody></table></div></section>
+}
+
+function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual }) {
   if (!project) return null
-  const dirty = project.modified + project.untracked
-  const nextTask = project.tasks.find(task => !task.assignee && task.status === 'open')
-  return (
-    <aside className="detail-drawer" aria-label={`${project.name} details`}>
-      <div className="drawer-title">
-        <div><span className={`health-dot ${project.health}`} /><h2>{project.name}</h2></div>
-        <button className="icon-button" onClick={onClose} aria-label="Close details"><X size={18} /></button>
-      </div>
-      <div className="drawer-status">
-        <StatusPill value={project.status} />
-        <Priority value={project.priority} />
-        <select value={project.status} onChange={event => onProjectUpdate(project.project_id, { status: event.target.value })}>
-          <option value="active">Active in Cortex</option><option value="paused">Paused / external</option><option value="archived">Archived</option>
-        </select>
-      </div>
-      <section><label>Current goal</label><p>{project.current_goal || 'No goal has been set.'}</p></section>
-      <section className="git-evidence">
-        <div><label>Git evidence</label><span><GitBranch size={14} />{project.branch || 'Not under Git'}</span></div>
-        <strong>{!project.git_status_available ? 'Live status deferred' : `${project.ahead != null ? `${project.ahead} ahead · ${project.behind} behind` : 'No upstream'}${dirty ? ` · ${dirty} changed` : ' · clean'}`}</strong>
-        {(project.warnings?.length > 0 || project.git_status_note) && <small><AlertTriangle size={13} />{project.warnings?.[0] || project.git_status_note}</small>}
-      </section>
-      <section className="drawer-tasks">
-        <div className="section-title"><label>Current tasks ({project.tasks.length})</label><button onClick={() => onAddTask(project.project_id)}><Plus size={14} />Add</button></div>
-        {project.tasks.slice(0, 8).map(task => (
-          <div className="drawer-task" key={task.id}>
-            <div><strong>{task.title}</strong><span><StatusPill value={task.status} /><Priority value={task.priority} /></span></div>
-            <div className="drawer-task-controls">
-              <select value={task.assignee || ''} onChange={event => onTaskUpdate(task.id, { assignee: event.target.value || null, status: event.target.value && task.status === 'open' ? 'assigned' : task.status })}>
-                <option value="">Recommended: {workers[task.recommended_worker]?.label || task.recommended_worker}</option>
-                {Object.entries(workers).map(([id, worker]) => <option key={id} value={id}>{worker.label}</option>)}
-              </select>
-              <select value={task.status} onChange={event => onTaskUpdate(task.id, { status: event.target.value })}>
-                {statusOptions.map(option => <option key={option} value={option}>{prettyStatus(option)}</option>)}
-              </select>
-            </div>
-          </div>
-        ))}
-        {!project.tasks.length && <div className="compact-empty">No active tasks.</div>}
-      </section>
-      {nextTask && (
-        <section className="recommendation-box">
-          <label>Next recommended assignment</label>
-          <WorkerBadge name={nextTask.recommended_worker} recommended />
-          <p>{nextTask.route.reasons?.at(-1)}</p>
-          <div><span>{nextTask.route.budget} budget</span><span>complexity {nextTask.route.complexity}/10</span></div>
-          <button className="primary full" onClick={() => onTaskUpdate(nextTask.id, { assignee: nextTask.recommended_worker, status: 'assigned' })}><WandSparkles size={15} />Assign recommended</button>
-        </section>
-      )}
-      <div className="drawer-path"><FolderGit2 size={14} /><span title={project.repo_path}>{project.repo_path}</span></div>
-    </aside>
-  )
+  return <aside className="drawer"><div className="drawer-head"><div><span className="project-monogram large" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span><span><small>{project.program}</small><h2>{project.name}</h2></span></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
+    <div className="drawer-primary"><button onClick={() => onPlan(project.project_id, 'codex')}><Sparkles size={16} />Ask Codex to plan next</button><button onClick={() => onPlan(project.project_id, 'ollama')}><Cpu size={16} />Use local planner</button></div>
+    <section><label>Current goal</label><p>{project.current_goal || 'No goal has been set.'}</p></section>
+    <section className="drawer-evidence"><label>Repository evidence</label><div><GitBranch size={14} />{project.branch || 'Not under Git'}<span>{project.git_status_available ? `${project.modified + project.untracked} changed` : 'live status deferred'}</span></div>{project.warnings?.[0] && <small><AlertTriangle size={13} />{project.warnings[0]}</small>}</section>
+    <section><div className="drawer-section-head"><label>Active work ({project.tasks.length})</label><button onClick={() => onManual(project.project_id)}><Plus size={13} />Manual</button></div><div className="drawer-task-list">{project.tasks.map(task => <div className="drawer-task" key={task.id}><div><strong>{task.title}</strong><span><StatusPill value={task.status} /><WorkerBadge name={task.assignee || task.recommended_worker} /></span></div><div>{task.status === 'assigned' && !['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()) && <button onClick={() => onStart(task)}><CirclePlay size={14} />Start</button>}<select value={task.status} onChange={event => onTaskUpdate(task.id, { status: event.target.value })}>{statuses.map(status => <option key={status} value={status}>{pretty(status)}</option>)}</select></div></div>)}{!project.tasks.length && <div className="lane-empty">No active tasks.</div>}</div></section>
+    <div className="drawer-path"><FolderGit2 size={14} /><span title={project.repo_path}>{project.repo_path}</span></div>
+  </aside>
 }
 
-function NewTaskModal({ projects, initialProject, onClose, onCreated }) {
-  const projectChoices = projects.filter(project => project.status === 'active' || project.project_id === initialProject)
-  const [form, setForm] = useState({ project_id: initialProject || projectChoices[0]?.project_id || '', title: '', type: 'review', priority: 3, risk: 'auto', budget: '', acceptance: '', assignee: '' })
+function ManualTaskModal({ projects, initialProject, onClose, onCreated }) {
+  const choices = projects.filter(project => project.status === 'active')
+  const [form, setForm] = useState({ project_id: initialProject || choices[0]?.project_id || '', title: '', type: 'review', acceptance: '' })
   const [saving, setSaving] = useState(false)
-  async function submit(event) {
-    event.preventDefault(); setSaving(true)
-    try {
-      const body = { ...form, budget: form.budget || null, assignee: form.assignee || null }
-      if (body.assignee) body.status = 'assigned'
-      await request('/api/tasks', { method: 'POST', body: JSON.stringify(body) })
-      onCreated()
-    } finally { setSaving(false) }
-  }
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={event => event.target === event.currentTarget && onClose()}>
-      <form className="task-modal" onSubmit={submit}>
-        <div className="modal-title"><div><span className="eyebrow">Portfolio queue</span><h2>Add a bounded task</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close task form"><X size={18} /></button></div>
-        <label>Project<select required value={form.project_id} onChange={e => setForm({ ...form, project_id: e.target.value })}>{projectChoices.map(project => <option key={project.project_id} value={project.project_id}>{project.name}</option>)}</select></label>
-        <label>Task title<input required autoFocus value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="One concrete outcome" /></label>
-        <div className="form-grid">
-          <label>Type<select value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}>{['review','code','research','planning','docs','data','other'].map(v => <option key={v}>{v}</option>)}</select></label>
-          <label>Priority<select value={form.priority} onChange={e => setForm({ ...form, priority: Number(e.target.value) })}>{[1,2,3,4,5].map(v => <option key={v} value={v}>P{v}</option>)}</select></label>
-          <label>Risk<select value={form.risk} onChange={e => setForm({ ...form, risk: e.target.value })}>{['auto','low','medium','high'].map(v => <option key={v}>{v}</option>)}</select></label>
-          <label>Budget<select value={form.budget} onChange={e => setForm({ ...form, budget: e.target.value })}><option value="">Auto-route</option>{['local','small','medium','large'].map(v => <option key={v}>{v}</option>)}</select></label>
-        </div>
-        <label>Acceptance check<textarea value={form.acceptance} onChange={e => setForm({ ...form, acceptance: e.target.value })} placeholder="Done when…" rows="3" /></label>
-        <label>Assign now<select value={form.assignee} onChange={e => setForm({ ...form, assignee: e.target.value })}><option value="">Leave for automatic routing</option>{Object.entries(workers).map(([id, worker]) => <option key={id} value={id}>{worker.label}</option>)}</select></label>
-        <div className="modal-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={saving}>{saving ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}Add task</button></div>
-      </form>
-    </div>
-  )
+  async function submit(event) { event.preventDefault(); setSaving(true); try { await request('/api/tasks', { method: 'POST', body: JSON.stringify(form) }); onCreated() } finally { setSaving(false) } }
+  return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}><form className="manual-modal" onSubmit={submit}><div className="modal-head"><div><span className="eyebrow">Advanced fallback</span><h2>Add a task yourself</h2><p>Usually, use “Plan next moves” and approve a suggestion.</p></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></div><label>Project<select value={form.project_id} onChange={event => setForm({ ...form, project_id: event.target.value })}>{choices.map(project => <option key={project.project_id} value={project.project_id}>{project.name}</option>)}</select></label><label>Outcome<input autoFocus required value={form.title} onChange={event => setForm({ ...form, title: event.target.value })} placeholder="One concrete outcome" /></label><label>Type<select value={form.type} onChange={event => setForm({ ...form, type: event.target.value })}>{['review', 'code', 'research', 'planning', 'docs', 'data', 'other'].map(type => <option key={type}>{type}</option>)}</select></label><label>Done when<textarea rows="3" value={form.acceptance} onChange={event => setForm({ ...form, acceptance: event.target.value })} placeholder="Observable acceptance check" /></label><div className="modal-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={saving}>{saving ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />}Add to queue</button></div></form></div>
 }
 
 export default function App() {
-  const [data, setData] = useState(null)
-  const [activeNav, setActiveNav] = useState('overview')
-  const [selectedId, setSelectedId] = useState(null)
-  const [search, setSearch] = useState('')
-  const [modalProject, setModalProject] = useState(undefined)
-  const [error, setError] = useState('')
-  const [toast, setToast] = useState('')
-  const taskFocus = useRef(null)
+  const [data, setData] = useState(null), [activeNav, setActiveNav] = useState('overview')
+  const [selectedId, setSelectedId] = useState(null), [search, setSearch] = useState('')
+  const [planner, setPlanner] = useState('codex'), [job, setJob] = useState(null)
+  const [error, setError] = useState(''), [toast, setToast] = useState('')
+  const [manualProject, setManualProject] = useState(undefined)
+  const pollRef = useRef(null)
 
-  async function load(silent = false) {
-    if (!silent) setError('')
-    try { setData(await request('/api/portfolio')) }
-    catch (err) { setError(err.message) }
-  }
-  useEffect(() => { load() }, [])
-  useEffect(() => {
-    if (!toast) return undefined
-    const timer = setTimeout(() => setToast(''), 2800)
-    return () => clearTimeout(timer)
-  }, [toast])
+  async function load(silent = false) { if (!silent) setError(''); try { setData(await request('/api/portfolio')) } catch (err) { setError(err.message) } }
+  useEffect(() => { load(); return () => clearInterval(pollRef.current) }, [])
+  useEffect(() => { if (!toast) return undefined; const timer = setTimeout(() => setToast(''), 3500); return () => clearTimeout(timer) }, [toast])
 
+  const projectMap = useMemo(() => Object.fromEntries((data?.projects || []).map(project => [project.project_id, project])), [data])
   const filteredProjects = useMemo(() => {
     if (!data) return []
-    let rows = data.projects.filter(project => project.status !== 'archived')
-    if (activeNav === 'overview') rows = rows.filter(project => project.status === 'active')
-    else if (activeNav === 'paused') rows = rows.filter(project => project.status === 'paused')
-    else rows = rows.filter(project => project.program.toLowerCase().replaceAll('_', '-') === activeNav || project.program.toLowerCase().includes(activeNav.replace('-rd', '')))
-    if (search.trim()) {
-      const term = search.toLowerCase()
-      rows = rows.filter(project => `${project.name} ${project.current_goal || ''} ${project.program}`.toLowerCase().includes(term))
-    }
+    let rows = data.projects.filter(project => activeNav === 'paused' ? project.status === 'paused' : project.status === 'active')
+    if (activeNav === 'strategy-analysis') rows = rows.filter(project => project.program.toLowerCase().includes('strategy'))
+    if (search.trim()) { const term = search.toLowerCase(); rows = rows.filter(project => `${project.name} ${project.current_goal || ''}`.toLowerCase().includes(term)) }
     return rows.sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name))
   }, [data, activeNav, search])
-
   const visibleIds = new Set(filteredProjects.map(project => project.project_id))
-  const visibleTasks = data?.tasks.filter(task => visibleIds.has(task.project_id)) || []
-  const selected = data?.projects.find(project => project.project_id === selectedId) || null
+  const visibleTasks = (data?.tasks || []).filter(task => visibleIds.has(task.project_id))
+  const decisions = visibleTasks.filter(task => ['review', 'blocked'].includes(task.status) || ['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()))
+  const working = visibleTasks.filter(task => ['assigned', 'in_progress', 'running'].includes(task.status) && !['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()))
+  const suggestions = (data?.suggestions || []).filter(suggestion => visibleIds.has(suggestion.project_id))
+  const selected = projectMap[selectedId] || null
 
-  async function updateTask(id, fields) {
+  function watchJob(jobId, label) {
+    clearInterval(pollRef.current); setJob({ id: jobId, label, status: 'running' })
+    pollRef.current = setInterval(async () => {
+      try {
+        const payload = await request(`/api/jobs/${jobId}`)
+        if (payload.job.status === 'running') return
+        clearInterval(pollRef.current); setJob(null)
+        if (payload.job.status === 'failed') throw new Error(payload.job.error)
+        setToast(label === 'Planning' ? 'AI plan is ready for approval' : 'Agent run finished; review the result')
+        await load(true)
+        setTimeout(() => document.getElementById(label === 'Planning' ? 'recommendations' : 'needs-decision')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+      } catch (err) { clearInterval(pollRef.current); setJob(null); setError(err.message) }
+    }, 1500)
+  }
+
+  async function planProject(projectId = selectedId, workerOverride = planner, force = false) {
+    const target = projectId || filteredProjects[0]?.project_id
+    if (!target) { setError('Select an active project first.'); return }
+    let allowCloud = false
+    if (workerOverride === 'codex' && projectMap[target]?.privacy === 'restricted') {
+      allowCloud = window.confirm('This project is marked restricted. Allow the Codex CLI to inspect its repository in read-only mode for this plan?')
+      if (!allowCloud) return
+    }
+    try { const payload = await request(`/api/projects/${target}/plan`, { method: 'POST', body: JSON.stringify({ worker: workerOverride, force, allow_cloud: allowCloud }) }); watchJob(payload.job_id, 'Planning') } catch (err) { setError(err.message) }
+  }
+
+  async function continueWork() {
     try {
-      await request(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(fields) })
-      setToast(fields.assignee ? 'Assignment saved' : 'Task updated')
-      await load(true)
+      const payload = await request('/api/continue', { method: 'POST', body: JSON.stringify({ worker: planner }) })
+      if (payload.job_id) { watchJob(payload.job_id, 'Planning'); return }
+      const focus = payload.focus
+      if (focus.project_id) setSelectedId(focus.project_id)
+      const target = focus.kind === 'suggestion' ? `[data-suggestion="${focus.id}"]` : `[data-task="${focus.id}"]`
+      setTimeout(() => document.querySelector(target)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80)
+      setToast(focus.kind === 'decision' ? 'This item needs your decision' : focus.kind === 'suggestion' ? 'This is the next recommended move' : 'This is the next work item')
     } catch (err) { setError(err.message) }
   }
-  async function updateProject(id, fields) {
+
+  async function approveSuggestion(suggestion, start) {
+    let allowWrite = false
+    if (start && suggestion.action === 'implement') {
+      allowWrite = window.confirm('This will let the assigned agent edit an isolated Git worktree. Cortex will not merge the result. Continue?')
+      if (!allowWrite) return
+    }
     try {
-      await request(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(fields) })
-      setToast('Project status updated')
-      await load(true)
+      const payload = await request(`/api/suggestions/${suggestion.id}/approve`, { method: 'POST', body: JSON.stringify({ start, allow_write: allowWrite, approve_high_risk: false }) })
+      if (payload.job_id) watchJob(payload.job_id, 'Working')
+      else { setToast('Approved and assigned; ready to start'); await load(true) }
     } catch (err) { setError(err.message) }
   }
 
-  if (!data && !error) return <div className="app-loading"><span className="brand-mark"><span /><span /><span /><span /></span><LoaderCircle className="spin" size={20} />Loading local portfolio…</div>
+  async function startTask(task) {
+    let allowWrite = false
+    if (task.route.action === 'implement') {
+      allowWrite = window.confirm('Start this implementation in an isolated Git worktree? Cortex will not merge it.')
+      if (!allowWrite) return
+    }
+    try { const payload = await request(`/api/tasks/${task.id}/start`, { method: 'POST', body: JSON.stringify({ allow_write: allowWrite, approve_high_risk: false }) }); watchJob(payload.job_id, 'Working') } catch (err) { setError(err.message) }
+  }
+
+  async function updateTask(id, fields) { try { await request(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }); setToast('Task updated'); await load(true) } catch (err) { setError(err.message) } }
+  async function dismissSuggestion(id) { try { await request(`/api/suggestions/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'dismissed' }) }); setToast('Suggestion dismissed'); await load(true) } catch (err) { setError(err.message) } }
+
+  if (!data && !error) return <div className="app-loading"><LoaderCircle className="spin" size={22} />Loading your portfolio…</div>
   if (!data) return <div className="app-loading error"><CircleAlert size={24} /><strong>Dashboard unavailable</strong><span>{error}</span><button onClick={() => load()}><RotateCcw size={15} />Retry</button></div>
 
-  return (
-    <div className="app-shell">
-      <Sidebar active={activeNav} onChange={setActiveNav} pausedCount={data.summary.paused_projects} />
-      <div className={`content-shell ${selected ? 'drawer-open' : ''}`}>
-        <main>
-          <header className="topbar">
-            <div><span className="eyebrow">Local AI control plane</span><h1>Cortex Portfolio</h1></div>
-            <div className="top-actions">
-              <label className="search-box"><Search size={16} /><input aria-label="Search projects" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search projects" /></label>
-              <button className="primary" onClick={() => setModalProject(null)}><Plus size={16} />Add task</button>
-              <button onClick={() => taskFocus.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><WandSparkles size={16} />Route work</button>
-              <button className="icon-button" onClick={() => load()} aria-label="Refresh"><RefreshCw size={17} /></button>
-            </div>
-          </header>
-          {error && <div className="error-banner"><CircleAlert size={15} />{error}<button onClick={() => setError('')}><X size={14} /></button></div>}
-          <div className="main-content">
-            <SummaryStrip summary={data.summary} />
-            <section className="portfolio-section">
-              <div className="section-heading"><div><span className="eyebrow">{navItems.find(item => item[0] === activeNav)?.[1]}</span><h2>Project workstreams</h2></div><span>{filteredProjects.length} visible · {data.summary.attention_projects} active need attention</span></div>
-              <ProjectTable projects={filteredProjects} selectedId={selectedId} onSelect={setSelectedId} />
-            </section>
-            <div className="lower-grid">
-              <TaskQueue tasks={visibleTasks} onUpdate={updateTask} focusRef={taskFocus} />
-              <WorkerCapacity workerRows={data.workers} />
-            </div>
-            <footer><span>SQLite source of truth</span><span>{data.database}</span><span>Updated {relativeDate(data.generated_at)}</span></footer>
-          </div>
-        </main>
-        <DetailDrawer project={selected} onClose={() => setSelectedId(null)} onTaskUpdate={updateTask} onProjectUpdate={updateProject} onAddTask={id => setModalProject(id)} />
+  return <div className="app-shell">
+    <Sidebar data={data} active={activeNav} onChange={setActiveNav} selectedId={selectedId} onSelect={setSelectedId} />
+    <div className={`content-shell ${selected ? 'drawer-open' : ''}`}><main>
+      <header className="topbar"><div><span className="eyebrow">Local AI control plane</span><strong>Cortex Portfolio</strong></div><div><label className="search"><Search size={15} /><input aria-label="Search projects" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search projects" /></label><button className="icon-button" onClick={() => load()} aria-label="Refresh"><RefreshCw size={16} /></button></div></header>
+      {error && <div className="error-banner"><CircleAlert size={15} /><span>{error}</span><button onClick={() => setError('')}><X size={14} /></button></div>}
+      {job && <div className="job-banner"><LoaderCircle className="spin" size={16} /><span><strong>{job.label}</strong> continues in the background. You can keep using the dashboard.</span></div>}
+      <div className="main-content">
+        <Hero planner={planner} setPlanner={setPlanner} onContinue={continueWork} busy={Boolean(job)} onManual={() => setManualProject(null)} />
+        <div className="summary-line"><span><strong>{data.summary.needs_decision}</strong> need you</span><span><strong>{data.summary.working}</strong> assigned / working</span><span><strong>{data.summary.recommendations}</strong> ready to approve</span><span><strong>{data.summary.active_projects}</strong> active projects</span><em>Plans are cached to conserve tokens</em></div>
+        <DecisionLane tasks={decisions} projects={projectMap} onSelect={setSelectedId} onUpdate={updateTask} />
+        <WorkingLane tasks={working} projects={projectMap} onStart={startTask} onSelect={setSelectedId} />
+        <RecommendationLane suggestions={suggestions} projects={projectMap} onApprove={approveSuggestion} onDismiss={dismissSuggestion} onPlan={() => planProject()} planning={job?.label === 'Planning'} />
+        <ProjectsTable projects={filteredProjects} selectedId={selectedId} onSelect={setSelectedId} onPlan={id => planProject(id)} />
+        <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges or external actions</span></footer>
       </div>
-      {modalProject !== undefined && <NewTaskModal projects={data.projects} initialProject={modalProject || ''} onClose={() => setModalProject(undefined)} onCreated={async () => { setModalProject(undefined); setToast('Task added to the queue'); await load(true) }} />}
-      {toast && <div className="toast"><Check size={15} />{toast}</div>}
-    </div>
-  )
+    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} /></div>
+    {manualProject !== undefined && <ManualTaskModal projects={data.projects} initialProject={manualProject || ''} onClose={() => setManualProject(undefined)} onCreated={async () => { setManualProject(undefined); setToast('Manual task added'); await load(true) }} />}
+    {toast && <div className="toast"><Check size={15} />{toast}</div>}
+  </div>
 }

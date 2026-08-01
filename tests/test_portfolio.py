@@ -138,6 +138,20 @@ def test_dispatch_preview_is_non_mutating(conn, project, git_repo):
     assert store.get_task(conn, tid)["status"] == "open"
 
 
+def test_dispatch_honors_explicit_worker_assignment(conn, project):
+    task_id = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="Review architecture decisions",
+        type="review",
+        complexity=5,
+        assignee="codex",
+    )
+    planned = dispatcher.preview(conn, store.get_task(conn, task_id))
+    assert planned.route.worker == "codex"
+    assert planned.route.model == "default"
+
+
 def test_local_evidence_bundle_is_bounded_and_skips_env(git_repo):
     (git_repo / "PROJECT-STATUS.md").write_text("# Current\nship it\n", encoding="utf-8")
     (git_repo / ".env").write_text("SECRET=do-not-read\n", encoding="utf-8")

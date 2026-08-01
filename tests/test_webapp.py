@@ -39,3 +39,23 @@ def test_portfolio_payload_keeps_paused_projects_recoverable(conn, project):
     row = next(item for item in payload["projects"] if item["project_id"] == project["id"])
     assert row["status"] == "paused"
     assert payload["summary"]["paused_projects"] == 1
+
+
+def test_portfolio_payload_exposes_recommendations_separately(conn, project):
+    suggestion_id = store.create_suggestion(
+        conn,
+        project_id=project["id"],
+        title="Plan the next slice",
+        type="planning",
+        why="Keep scope bounded.",
+        acceptance="One accepted slice.",
+        recommended_worker="ollama",
+        recommended_model="phi4:14b",
+        action="review",
+    )
+
+    payload = webapp.portfolio_payload(conn)
+    assert payload["summary"]["recommendations"] == 1
+    assert payload["suggestions"][0]["id"] == suggestion_id
+    assert payload["projects"][0]["suggestion_count"] == 1
+    assert payload["tasks"] == []

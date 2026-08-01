@@ -9,10 +9,9 @@ See `AI-CNS-V1-MVP-Spec.md` for the original design.
 
 ## What works now
 
-1. **Local visual portfolio dashboard and daily digest** - project lanes,
-   recoverable paused/external projects, task assignments, automatic route
-   recommendations, worker availability, Git evidence, program, priority, and
-   privacy.
+1. **AI project-manager dashboard and daily focus** - one Continue action,
+   human-decision and agent-work queues, cached next-move suggestions,
+   recoverable paused/external projects, Git evidence, and clear ownership.
 2. **Context compiler** - creates a bounded model-ready brief and blocks known
    secrets or PII before it leaves the machine.
 3. **Rule-based routing** - recommends a worker, model tier, budget, action, and
@@ -67,17 +66,37 @@ build; later launches go straight to `http://127.0.0.1:8765`. Use `-Rebuild`
 after changing frontend source, `-NoOpen` to suppress browser launch, or a
 different local port with `-Port 8877`.
 
-Inside the dashboard you can:
+The intended daily workflow is deliberately short:
 
-- switch between Overview, Strategy Analysis, monetization, infrastructure,
-  and Paused / External lanes;
-- open a project drawer for its goal, branch, tasks, routing rationale, and
-  local path;
-- add a bounded task with priority, risk, budget, and acceptance criteria;
-- accept the recommended worker or assign Codex, Claude, Gemini, Grok, Ollama,
-  Perplexity, or yourself;
-- move tasks through assigned, running, review, blocked, and done;
-- pause or reactivate a project without deleting its history.
+1. Click **Continue with AI**. Cortex first points to a review, blocked item,
+   assigned run, or existing recommendation without spending an AI token.
+2. If a project has no actionable work, select it and click **Plan next moves**.
+   Smart mode asks the Codex CLI for three bounded proposals; Local mode asks
+   Ollama. Plans are cached, and a deterministic no-token plan is used if the
+   selected CLI is unavailable.
+3. Click **Approve & start** on one proposal. Cortex converts only that proposal
+   into a task, assigns the routed worker, and starts read-only work. Code edits
+   require one explicit confirmation and run in an isolated Git worktree.
+4. Return when the item appears in **Needs your decision**. Cortex never merges
+   work or takes an external action automatically.
+
+Manual task entry remains under **More** for known one-off work; it is not the
+primary path.
+
+The CLI mirrors the same loop:
+
+```powershell
+cd D:\ai-cns
+.\scripts\cortex-portfolio.ps1 focus
+.\scripts\cortex-portfolio.ps1 plan nt-strategy-forge --worker codex --allow-cloud
+.\scripts\cortex-portfolio.ps1 approve <suggestion-id> --start
+```
+
+Use `--worker ollama` for a local plan. Use `--queue` instead of `--start` to
+approve and assign without running the worker. Implementation requires the
+additional `--allow-write` flag and always uses an isolated worktree.
+Projects marked `restricted` use the local/no-token planner unless Codex access
+is explicitly approved with `--allow-cloud` (or the matching dashboard prompt).
 
 The fast web view reads branch and activity metadata without running a fleet of
 Git processes across large or shared repositories. Use the CLI `dashboard`

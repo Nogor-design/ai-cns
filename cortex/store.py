@@ -22,6 +22,7 @@ TASK_STATUSES = {
     "done", "abandoned",
 }
 STATE_MODES = {"tracked", "deferred"}
+SUGGESTION_STATUSES = {"proposed", "converted", "dismissed"}
 
 
 class NotFound(LookupError):
@@ -195,6 +196,140 @@ def update_task(conn: sqlite3.Connection, task_id: str, **fields: Any) -> None:
         f"UPDATE tasks SET {cols} WHERE id = ?", (*fields.values(), task_id)
     )
     conn.commit()
+
+
+# ------------------------------------------------------------ suggestions ---
+def create_suggestion(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    title: str,
+    type: str = "other",
+    why: str | None = None,
+    brief: str | None = None,
+    risk: str = "auto",
+    complexity: int | None = None,
+    acceptance: str | None = None,
+    allowed_paths: str | None = None,
+    budget: str | None = None,
+    priority: int = 3,
+    recommended_worker: str | None = None,
+    recommended_model: str | None = None,
+    action: str | None = None,
+    reviewer: str | None = None,
+    requires_approval: bool = False,
+    source_worker: str = "deterministic",
+    source_model: str | None = None,
+) -> str:
+    if type not in TASK_TYPES:
+        type = "other"
+    if risk not in TASK_RISKS:
+        risk = "auto"
+    if complexity is not None:
+        complexity = max(0, min(10, int(complexity)))
+    priority = max(1, min(5, int(priority)))
+    sid = ids.short_id()
+    ts = ids.now()
+    conn.execute(
+        """INSERT INTO suggestions
+           (id, project_id, title, type, status, why, brief, risk, complexity,
+            acceptance, allowed_paths, budget, priority, recommended_worker,
+            recommended_model, action, reviewer, requires_approval,
+            source_worker, source_model, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            sid, project_id, title, type, "proposed", why, brief, risk,
+            complexity, acceptance, allowed_paths, budget, priority,
+            recommended_worker, recommended_model, action, reviewer,
+            int(requires_approval), source_worker, source_model, ts, ts,
+        ),
+    )
+    conn.commit()
+    return sid
+
+
+def get_suggestion(conn: sqlite3.Connection, suggestion_id: str) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT * FROM suggestions WHERE id = ?", (suggestion_id,)
+    ).fetchone()
+    if row is None:
+        raise NotFound(f"suggestion not found: {suggestion_id}")
+    return row
+
+
+def list_suggestions(
+    conn: sqlite3.Connection,
+    project_id: str | None = None,
+    *,
+    status: str | None = "proposed",
+) -> list[sqlite3.Row]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if project_id:
+        clauses.append("suggestions.project_id = ?")
+        params.append(project_id)
+    if status:
+        clauses.append("suggestions.status = ?")
+        params.append(status)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    return conn.execute(
+        f"""SELECT suggestions.*, projects.name AS project_name,
+                   projects.program AS project_program,
+                   projects.status AS project_status
+            FROM suggestions JOIN projects ON projects.id = suggestions.project_id
+            {where}
+            ORDER BY suggestions.priority, suggestions.created_at DESC""",
+        params,
+    ).fetchall()
+
+
+def update_suggestion(
+    conn: sqlite3.Connection, suggestion_id: str, **fields: Any
+) -> None:
+    if not fields:
+        return
+    if "status" in fields and fields["status"] not in SUGGESTION_STATUSES:
+        raise ValueError(f"invalid suggestion status: {fields['status']}")
+    allowed = {
+        "title", "type", "status", "why", "brief", "risk", "complexity",
+        "acceptance", "allowed_paths", "budget", "priority", "task_id",
+    }
+    unexpected = set(fields) - allowed
+    if unexpected:
+        raise ValueError(f"invalid suggestion fields: {', '.join(sorted(unexpected))}")
+    fields["updated_at"] = ids.now()
+    cols = ", ".join(f"{key} = ?" for key in fields)
+    conn.execute(
+        f"UPDATE suggestions SET {cols} WHERE id = ?",
+        (*fields.values(), suggestion_id),
+    )
+    conn.commit()
+
+
+def convert_suggestion(conn: sqlite3.Connection, suggestion_id: str) -> str:
+    """Atomically turn one proposed suggestion into an assigned task."""
+    suggestion = get_suggestion(conn, suggestion_id)
+    if suggestion["status"] == "converted" and suggestion["task_id"]:
+        return str(suggestion["task_id"])
+    if suggestion["status"] != "proposed":
+        raise ValueError(f"suggestion is {suggestion['status']}, not proposed")
+    task_id = create_task(
+        conn,
+        project_id=suggestion["project_id"],
+        title=suggestion["title"],
+        type=suggestion["type"],
+        brief=suggestion["brief"],
+        risk=suggestion["risk"],
+        complexity=suggestion["complexity"],
+        acceptance=suggestion["acceptance"],
+        allowed_paths=suggestion["allowed_paths"],
+        budget=suggestion["budget"],
+        priority=suggestion["priority"],
+        assignee=suggestion["recommended_worker"],
+    )
+    update_task(conn, task_id, status="assigned")
+    update_suggestion(conn, suggestion_id, status="converted", task_id=task_id)
+    return task_id
 
 
 # -------------------------------------------------------------------- runs ---

@@ -48,6 +48,11 @@ def preview(
 ) -> DispatchPreview:
     project = store.get_project(conn, task["project_id"])
     route = routing.route_task(project, task)
+    explicit_assignee = str(task["assignee"] or "").lower()
+    if not worker_override and explicit_assignee in {
+        "codex", "claude", "gemini", "grok", "ollama"
+    }:
+        worker_override = explicit_assignee
     route = _with_overrides(route, worker_override, model_override, action_override)
     compiled = brief_mod.compile_brief(
         conn,
@@ -244,6 +249,14 @@ def _with_overrides(
     values = route.__dict__.copy()
     if worker:
         values["worker"] = worker
+        if not model:
+            values["model"] = {
+                "codex": "default",
+                "claude": "sonnet",
+                "gemini": "default",
+                "grok": "default",
+                "ollama": "phi4:14b",
+            }.get(worker, values["model"])
     if model:
         values["model"] = model
     if action:

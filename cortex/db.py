@@ -82,10 +82,38 @@ CREATE TABLE IF NOT EXISTS decisions (
     source      TEXT
 );
 
+CREATE TABLE IF NOT EXISTS suggestions (
+    id                 TEXT PRIMARY KEY,
+    project_id         TEXT NOT NULL REFERENCES projects(id),
+    title              TEXT NOT NULL,
+    type               TEXT NOT NULL DEFAULT 'other',
+    status             TEXT NOT NULL DEFAULT 'proposed', -- proposed|converted|dismissed
+    why                TEXT,
+    brief              TEXT,
+    risk               TEXT NOT NULL DEFAULT 'auto',
+    complexity         INTEGER,
+    acceptance         TEXT,
+    allowed_paths      TEXT,
+    budget             TEXT,
+    priority           INTEGER NOT NULL DEFAULT 3,
+    recommended_worker TEXT,
+    recommended_model  TEXT,
+    action             TEXT,
+    reviewer           TEXT,
+    requires_approval  INTEGER NOT NULL DEFAULT 0,
+    source_worker      TEXT NOT NULL DEFAULT 'deterministic',
+    source_model       TEXT,
+    task_id            TEXT REFERENCES tasks(id),
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id);
+CREATE INDEX IF NOT EXISTS idx_suggestions_project ON suggestions(project_id);
+CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
 
 -- Model history for decision support: computed, never stored (spec section 4).
 -- Recreate it on connect so additive outcome semantics reach older databases.

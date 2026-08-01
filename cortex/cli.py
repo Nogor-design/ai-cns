@@ -27,6 +27,7 @@ from . import (
     dispatcher,
     health,
     ids,
+    pm as pm_mod,
     routing as routing_mod,
     runs as runs_mod,
     state as state_mod,
@@ -416,6 +417,157 @@ def doctor():
     for name in ("codex", "claude", "gemini", "grok", "ollama"):
         typer.echo(f"  {name:<8} {'ready' if workers.available(name) else 'missing'}")
     typer.echo("  perplexity manual/API (no local CLI configured)")
+
+
+# ---------------------------------------------------------- AI PM workflow ---
+@app.command()
+def focus(
+    project: str = typer.Argument(None, help="Optional project id or name."),
+):
+    """Show the one thing that should receive attention next (no AI tokens)."""
+    conn = _conn()
+    project_id = None
+    if project:
+        try:
+            project_id = store.get_project(conn, project)["id"]
+        except store.NotFound as exc:
+            _err(str(exc))
+    result = pm_mod.portfolio_focus(conn, project_id)
+    item = result["focus"]
+    kind = item["kind"]
+    if kind == "empty":
+        typer.echo("No active project needs attention.")
+        return
+    if kind in {"decision", "work", "task"}:
+        task = store.get_task(conn, item["id"])
+        project_row = store.get_project(conn, task["project_id"])
+        heading = {
+            "decision": "NEEDS YOUR DECISION",
+            "work": "AI WORKING / READY TO START",
+            "task": "NEXT READY TASK",
+        }[kind]
+        typer.secho(heading, fg=typer.colors.YELLOW if kind == "decision" else typer.colors.CYAN)
+        typer.echo(f"project: {project_row['name']}")
+        typer.echo(f"task:    {task['id']}  {task['title']}")
+        typer.echo(f"status:  {task['status']}")
+        if kind in {"work", "task"}:
+            if str(task["assignee"] or "").lower() in {"owner", "perplexity"}:
+                typer.echo("next:    complete this manually, then update its status")
+            else:
+                typer.echo(f"next:    cortex dispatch {task['id']} --execute")
+        else:
+            typer.echo("next:    review the captured result or unblock the task")
+        return
+    if kind == "suggestion":
+        suggestion = store.get_suggestion(conn, item["id"])
+        typer.secho("RECOMMENDED NEXT MOVE", fg=typer.colors.GREEN)
+        typer.echo(f"project: {suggestion['project_name'] if 'project_name' in suggestion.keys() else item['project_id']}")
+        typer.echo(f"idea:    {suggestion['id']}  {suggestion['title']}")
+        typer.echo(f"why:     {suggestion['why']}")
+        typer.echo(f"next:    cortex approve {suggestion['id']} --start")
+        return
+    project_row = store.get_project(conn, item["project_id"])
+    typer.secho("PLAN NEEDED", fg=typer.colors.CYAN)
+    typer.echo(f"project: {project_row['name']}")
+    typer.echo(f"next:    cortex plan {project_row['id']}")
+
+
+@app.command("next")
+def next_action(
+    project: str = typer.Argument(None, help="Optional project id or name."),
+):
+    """Alias for `cortex focus`: show the next useful action without planning."""
+    focus(project)
+
+
+@app.command("plan")
+def plan_command(
+    project: str = typer.Argument(None, help="Project id/name; defaults to top active project."),
+    worker: str = typer.Option("codex", "--worker", help="codex or ollama."),
+    model: str = typer.Option("default", "--model", help="Optional worker model."),
+    count: int = typer.Option(3, "--count", min=1, max=3),
+    force: bool = typer.Option(False, "--force", help="Replace current unapproved suggestions."),
+    strict: bool = typer.Option(False, "--strict", help="Fail instead of using the no-token fallback."),
+    allow_cloud: bool = typer.Option(
+        False, "--allow-cloud", help="Allow Codex planning for a restricted project."
+    ),
+):
+    """Ask an AI PM for bounded next moves; current suggestions are cached."""
+    if worker not in {"codex", "ollama"}:
+        _err("planning worker must be codex or ollama")
+    conn = _conn()
+    try:
+        if project:
+            project_row = store.get_project(conn, project)
+        else:
+            active = sorted(
+                (row for row in store.list_projects(conn) if row["status"] == "active"),
+                key=lambda row: (row["priority"], row["updated_at"]),
+            )
+            if not active:
+                _err("no active projects")
+            project_row = active[0]
+        result = pm_mod.plan_project(
+            conn, project_row, worker=worker, model=model, count=count,
+            force=force, strict=strict, allow_cloud=allow_cloud,
+        )
+    except (store.NotFound, pm_mod.PlanningError) as exc:
+        _err(str(exc))
+    source = result.source_worker
+    typer.secho(
+        f"{'reused' if result.cached else 'created'} {len(result.suggestion_ids)} suggestions for {project_row['name']}",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(f"planner: {source}{':' + result.source_model if result.source_model else ''}")
+    if result.note:
+        typer.echo(f"note:    {result.note}")
+    for sid in result.suggestion_ids:
+        row = store.get_suggestion(conn, sid)
+        typer.echo(f"\n{row['id']}  {row['title']}")
+        typer.echo(f"  why:        {row['why']}")
+        typer.echo(f"  acceptance: {row['acceptance']}")
+        typer.echo(
+            f"  route:      {row['recommended_worker']}:{row['recommended_model']} "
+            f"({row['action']}, {row['budget']})"
+        )
+    typer.echo(f"\nApprove one: cortex approve {result.suggestion_ids[0]} --start")
+
+
+@app.command()
+def approve(
+    suggestion_id: str = typer.Argument(..., help="Suggestion id."),
+    start: bool = typer.Option(False, "--start/--queue", help="Start now or only queue it."),
+    allow_write: bool = typer.Option(
+        False, "--allow-write", help="Allow implementation in an isolated worktree."
+    ),
+    approve_high_risk: bool = typer.Option(
+        False, "--approve-high-risk", help="Explicitly approve a high-risk/restricted route."
+    ),
+):
+    """Approve a recommendation, assign it, and optionally start its worker."""
+    conn = _conn()
+    try:
+        task_id = store.convert_suggestion(conn, suggestion_id)
+        task = store.get_task(conn, task_id)
+    except (store.NotFound, ValueError) as exc:
+        _err(str(exc))
+    typer.secho(f"approved and assigned task {task_id}", fg=typer.colors.GREEN)
+    if not start:
+        typer.echo(f"start later: cortex dispatch {task_id} --execute")
+        return
+    try:
+        result = dispatcher.dispatch(
+            conn, task, allow_write=allow_write,
+            approve_high_risk=approve_high_risk,
+        )
+    except (dispatcher.DispatchError, brief_mod.SecretsDetected) as exc:
+        typer.secho(f"queued, but not started: {exc}", fg=typer.colors.YELLOW)
+        typer.echo(f"task remains assigned: {task_id}")
+        raise typer.Exit(code=2)
+    typer.secho(
+        f"run {result.run_id} finished: {result.task_status}",
+        fg=typer.colors.GREEN if result.task_status in {"done", "review"} else typer.colors.RED,
+    )
 
 
 @app.command()
