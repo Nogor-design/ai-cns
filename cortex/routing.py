@@ -8,7 +8,20 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from . import policy
+
+# Each worker's default model, used when a substitution makes the routed
+# model meaningless (Ollama needs a tagged local model, the cloud CLIs do not).
+DEFAULT_MODELS: dict[str, str] = {
+    "codex": "default",
+    "claude": "sonnet",
+    "gemini": "default",
+    "grok": "default",
+    "ollama": "phi4:14b",
+    "perplexity": "search",
+}
 
 
 _HIGH_RISK = re.compile(
@@ -45,9 +58,72 @@ class Route:
     reviewer: str | None
     requires_approval: bool
     reasons: tuple[str, ...]
+    # Set when the project's allowlist overrode the task-based choice, so the
+    # dashboard can show both what was ideal and what will actually run.
+    preferred_worker: str | None = None
+    policy_note: str | None = None
+    blocked_reason: str | None = None
+    # The task's explicit model request, if any. Kept so that changing the
+    # worker can fall back to that worker's default without discarding a
+    # choice the owner actually made.
+    requested_model: str | None = None
 
 
 def route_task(project: sqlite3.Row, task: sqlite3.Row) -> Route:
+    """Route on task characteristics, then constrain to the project's allowlist."""
+    route = _route_by_task(project, task)
+    requested = task["requested_model"] if "requested_model" in task.keys() else None
+    if requested:
+        route = replace(route, requested_model=str(requested))
+    return apply_policy(project, route)
+
+
+def _model_for(worker: str, route: Route) -> str:
+    """The model to use once `worker` is running this route.
+
+    Model names are worker-specific ("sonnet" means nothing to Codex), so a
+    worker change resets to that worker's default unless the owner explicitly
+    requested a model on the task.
+    """
+    return route.requested_model or DEFAULT_MODELS.get(worker, "default")
+
+
+def effective_route(project: sqlite3.Row, task: sqlite3.Row) -> Route:
+    """The route dispatch will actually use, absent a caller-supplied override.
+
+    A task's stored assignee outranks the task-based recommendation but is
+    still subject to project policy. Everything that needs to predict a
+    dispatch -- the dashboard, the team panel, unattended starts -- goes
+    through here so none of them can disagree with the dispatcher.
+    """
+    route = route_task(project, task)
+    assignee = str(task["assignee"] or "").lower()
+    if assignee not in DEFAULT_MODELS or assignee == route.worker:
+        return route
+    return apply_policy(
+        project,
+        replace(route, worker=assignee, model=_model_for(assignee, route)),
+    )
+
+
+def apply_policy(project: sqlite3.Row, route: Route) -> Route:
+    """Force the routed worker onto the project's permitted list."""
+    chosen = policy.choose_worker(project, route.worker)
+    if chosen == route.worker:
+        return route
+    note = policy.explain(project, route.worker, chosen)
+    flagged = replace(
+        route,
+        preferred_worker=route.worker,
+        policy_note=note,
+        reasons=route.reasons + ((note,) if note else ()),
+    )
+    if chosen is None:
+        return replace(flagged, blocked_reason=note)
+    return replace(flagged, worker=chosen, model=_model_for(chosen, route))
+
+
+def _route_by_task(project: sqlite3.Row, task: sqlite3.Row) -> Route:
     text = " ".join(
         value
         for value in (task["title"], task["brief"] or "", task["acceptance"] or "")

@@ -17,6 +17,8 @@ node_modules/
 
 # Local databases
 *.db
+*.db-shm
+*.db-wal
 
 # IDE
 .idea/

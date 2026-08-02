@@ -53,6 +53,7 @@ def inspect_project(
     stale_days: int = 14,
     tasks: list[sqlite3.Row] | None = None,
     live_git: bool = True,
+    scan_activity: bool = True,
 ) -> ProjectHealth:
     repo = Path(project["repo_path"])
     exists = repo.exists()
@@ -66,7 +67,7 @@ def inspect_project(
                 if project["status"] == "active"
                 else "Live Git status deferred while paused"
             ),
-            scan_tree=project["status"] == "active",
+            scan_tree=scan_activity and project["status"] == "active",
         )
         if exists
         else gitutil.RepoSnapshot()
@@ -158,6 +159,7 @@ def inspect_portfolio(
     include_archived: bool = False,
     stale_days: int = 14,
     live_git: bool = True,
+    scan_activity: bool = True,
 ) -> list[ProjectHealth]:
     projects = store.list_projects(conn)
     if not include_paused:
@@ -181,6 +183,7 @@ def inspect_portfolio(
                     stale_days=stale_days,
                     tasks=task_index[str(project["id"])],
                     live_git=live_git,
+                    scan_activity=scan_activity,
                 ),
                 project_dicts,
             )

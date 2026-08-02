@@ -12,18 +12,47 @@ See `AI-CNS-V1-MVP-Spec.md` for the original design.
 1. **AI project-manager dashboard and expert team** - one Continue action,
    visible working/queued/idle agent states, cached next-move suggestions,
    recoverable paused/external projects, Git evidence, and clear ownership.
-2. **Context compiler** - creates a bounded model-ready brief and blocks known
+2. **Per-project worker allowlist** - each repository declares which CLIs may
+   read it. Routing chooses the best worker it is allowed to choose instead of
+   recommending one worker and then refusing it.
+3. **Live run output** - workers stream as they work, so a long agent run shows
+   what it is reading and doing rather than an indeterminate progress bar.
+4. **Context compiler** - creates a bounded model-ready brief and blocks known
    secrets or PII before it leaves the machine.
-3. **Rule-based routing** - recommends a worker, model tier, budget, action, and
+5. **Rule-based routing** - recommends a worker, model tier, budget, action, and
    reviewer from task type, risk, privacy, complexity, and acceptance criteria.
-4. **Safe headless dispatch** - dry-run by default. Read-only work can use
+6. **Safe headless dispatch** - dry-run by default. Read-only work can use
    Codex, Claude, Gemini, Grok, or Ollama. Write work requires `--allow-write`
    and runs in a separate Git worktree.
-5. **Evidence capture** - records command, output, usage metadata when exposed,
+7. **Evidence capture** - records command, output, usage metadata when exposed,
    changed files, path-scope violations, test results, and whether work later
    survived into Git history.
 
 No dispatcher merges work automatically.
+
+## Which worker may see which repository
+
+Privacy is enforced in exactly one place: a per-project allowlist. It answers a
+single question - *which workers is this repository willing to expose itself
+to?* - and everything else follows from it.
+
+```powershell
+.\scripts\cortex-portfolio.ps1 project workers nt-strategy-forge
+.\scripts\cortex-portfolio.ps1 project workers nt-strategy-forge claude,ollama
+```
+
+The same control is in each project's drawer in the dashboard. Two guarantees
+are kept deliberately separate:
+
+- The **allowlist** controls who may read the repository (a privacy question).
+- **`--allow-write`** and isolated worktrees control whether files change (a
+  blast-radius question).
+
+A project with no explicit allowlist falls back to a default by privacy level:
+`restricted` stays local (Ollama only), everything else may use any worker. When
+routing wants a worker a project does not permit, Cortex substitutes the best
+permitted one and labels the substitution rather than leaving a task that no
+button can start.
 
 ## Install
 
@@ -83,8 +112,10 @@ The intended daily workflow is deliberately short:
    into a task, assigns the routed worker, and starts read-only work. Code edits
    require one explicit confirmation and run in an isolated Git worktree.
 5. Follow **Execution activity** to see the actual worker, model/effort, start time, elapsed
-   time, completion state, exit code, and captured response. This evidence
-   survives a dashboard refresh.
+   time, completion state, exit code, and captured response. Open a running item
+   to watch its live output as the agent reads files and calls tools; the
+   transcript is written to `.cortex/runs/logs/<run-id>.log` and survives a
+   dashboard refresh or restart.
 6. Use **Check GitHub** to refresh stored working-tree and remote ahead/behind
    evidence. The scorecard learns success by model, effort, and task type.
 7. Return when the item appears in **Needs your decision**. Cortex never merges
@@ -173,8 +204,10 @@ create `.cortex/state.md` yet.
 .\scripts\cortex-portfolio.ps1 dispatch <task-id> --execute
 ```
 
-The compiled brief is scanned locally before execution. Restricted/high-risk
-work requires explicit `--approve-high-risk` unless it stays with Ollama.
+The compiled brief is scanned locally for secrets before every execution, local
+or not. Dispatch refuses a worker the project's allowlist does not permit; it no
+longer refuses read-only work for being high risk, because a review that cannot
+run is not safer than one that can.
 
 Review and score the captured result:
 
@@ -222,6 +255,8 @@ cortex state my-project --regen
 
 ## Safety rules
 
+- Keep each project's worker allowlist honest; it is the only thing standing
+  between a private repository and a cloud CLI.
 - Do not use bypass-permission or YOLO modes on canonical repositories.
 - Do not run write agents until the canonical worktree is checkpointed.
 - Keep customer data and proprietary trading material local unless the compiled

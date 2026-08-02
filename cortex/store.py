@@ -95,6 +95,15 @@ def update_project(conn: sqlite3.Connection, project_id: str, **fields: Any) -> 
         fields["priority"] = max(1, min(5, int(fields["priority"])))
     if "state_mode" in fields and fields["state_mode"] not in STATE_MODES:
         raise ValueError(f"invalid state mode: {fields['state_mode']}")
+    if "allowed_workers" in fields and fields["allowed_workers"] is not None:
+        value = fields["allowed_workers"]
+        if not isinstance(value, str) or not value.startswith("["):
+            from . import policy
+
+            fields["allowed_workers"] = policy.encode(
+                value if isinstance(value, (list, tuple, set))
+                else str(value).replace(",", "\n").split()
+            )
     fields["updated_at"] = ids.now()
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(

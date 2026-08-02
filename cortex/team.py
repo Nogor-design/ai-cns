@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
-from . import routing, store, workers
+from . import policy, routing, store, workers
 
 
 EXPERTS: dict[str, dict[str, Any]] = {
@@ -57,7 +57,7 @@ def team_payload(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for name, expert in EXPERTS.items():
-        probe = workers.probe(name)
+        probe = workers.probe_cached(name)
         worker_tasks = [
             task for task in tasks
             if str(task.get("assignee") or task.get("recommended_worker") or "").lower() == name
@@ -107,32 +107,41 @@ def safe_start_candidates(
     """One already-approved read-only task per available, non-running worker."""
     projects = {row["id"]: row for row in store.list_projects(conn)}
     all_tasks = store.list_all_tasks(conn)
-    running_workers = {
-        str(row["assignee"] or "").lower()
-        for row in all_tasks if row["status"] == "running" and row["assignee"]
-    }
+    limit = max(1, min(6, limit))
+
+    # Group assigned work by the worker that would actually run it, not by the
+    # stored assignee. A task assigned to Codex on a Claude-only project is
+    # dispatchable as Claude, and grouping by assignee would hide it forever.
+    by_worker: dict[str, list[str]] = {}
+    running_workers: set[str] = set()
+    for row in all_tasks:
+        project = projects[row["project_id"]]
+        if row["status"] == "running":
+            running_workers.add(routing.effective_route(project, row).worker)
+            continue
+        if row["status"] != "assigned" or project["status"] != "active":
+            continue
+        route = routing.effective_route(project, row)
+        # Only writes are withheld from an unattended start; they need an
+        # explicit allow_write and an isolated worktree. Read-only work is
+        # gated purely by whether this project permits this worker.
+        if route.action == "implement" or route.blocked_reason:
+            continue
+        if not policy.is_allowed(project, route.worker):
+            continue
+        by_worker.setdefault(route.worker, []).append(row["id"])
+
     selected: list[str] = []
     for worker in EXPERTS:
-        if worker in {"perplexity"} or worker in running_workers:
+        if worker == "perplexity" or worker in running_workers:
+            continue
+        queue = by_worker.get(worker)
+        if not queue:
             continue
         if workers.probe(worker)["availability"] != "ready":
             continue
-        candidates = [
-            row for row in all_tasks
-            if row["status"] == "assigned"
-            and str(row["assignee"] or "").lower() == worker
-            and projects[row["project_id"]]["status"] == "active"
-        ]
-        for task in candidates:
-            project = projects[task["project_id"]]
-            route = routing.route_task(project, task)
-            if route.action == "implement" or route.risk == "high":
-                continue
-            if project["privacy"] == "restricted" and worker != "ollama":
-                continue
-            selected.append(task["id"])
-            break
-        if len(selected) >= max(1, min(6, limit)):
+        selected.append(queue[0])
+        if len(selected) >= limit:
             break
     return selected
 

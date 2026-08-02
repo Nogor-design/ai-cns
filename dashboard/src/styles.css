@@ -314,3 +314,80 @@ footer span:last-child { margin-left: auto; }
   .working-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .recommendation-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+@media (max-width: 760px) {
+  body { min-width: 0; }
+  .app-shell { display: block; min-width: 0; }
+  .sidebar { position: static; width: 100%; min-height: 0; }
+  .wordmark { height: 62px; padding: 13px 16px; }
+  .wordmark strong { font-size: 17px; }
+  .sidebar nav { grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 9px; }
+  .sidebar nav button { justify-content: center; padding: 9px 6px; }
+  .sidebar nav button span { flex: 0 1 auto; }
+  .sidebar nav button.active { box-shadow: inset 0 -3px #4fc8b4; }
+  .project-rail-title { padding: 11px 15px 5px; }
+  .project-rail { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); padding: 3px 9px 11px; }
+  .sidebar-foot { display: none; }
+
+  .content-shell, .content-shell.drawer-open { width: 100%; min-width: 0; padding-right: 0; }
+  .topbar { height: 62px; padding: 0 14px; }
+  .topbar .eyebrow { display: none; }
+  .topbar > div { gap: 7px; }
+  .search { width: 145px; min-width: 0; }
+  .main-content { width: 100%; padding: 14px 12px 18px; }
+
+  .hero { min-height: 0; padding: 23px 20px; flex-direction: column; align-items: stretch; gap: 22px; }
+  .hero h1 { font-size: 28px; }
+  .hero-actions { width: 100%; flex: 0 1 auto; }
+  .summary-line { padding: 10px 12px; gap: 16px; overflow-x: auto; }
+  .summary-line em { display: none; }
+
+  .band-heading { align-items: flex-start; flex-wrap: wrap; }
+  .band-heading > button { margin-left: 48px; }
+  .team-grid, .decision-list, .working-grid, .recommendation-grid, .health-grid {
+    grid-template-columns: 1fr;
+  }
+  .decision-list article, .working-grid article, .health-grid > article { border-right: 0; }
+  .team-grid, .recommendation-grid { padding: 10px; }
+  .expert-card { min-height: 205px; }
+  .suggestion-card { min-height: 0; }
+  .plan-empty { padding: 18px; align-items: flex-start; flex-direction: column; }
+  .run-list { overflow-x: auto; }
+  .run-row { min-width: 670px; }
+
+  .section-title { padding: 12px 14px; }
+  footer { flex-wrap: wrap; gap: 8px 14px; padding: 13px 2px; }
+  footer span:last-child { width: 100%; margin-left: 0; }
+
+  .drawer { width: 100%; padding: 18px; }
+  .drawer-primary { grid-template-columns: 1fr; }
+  .drawer-task > div:last-child { flex-wrap: wrap; }
+  .manual-modal, .run-modal { width: calc(100vw - 24px); max-height: calc(100vh - 24px); padding: 17px; }
+  .run-facts { grid-template-columns: repeat(2, 1fr); }
+  .run-facts > span:nth-child(2) { border-right: 0; }
+  .run-facts > span:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+  .toast { left: 12px; right: 12px; bottom: 12px; }
+}
+
+/* --- Live worker output ------------------------------------------------ */
+/* A compact tail on the working cards, and a followable transcript in the
+   run modal. Monospace so column-aligned CLI output stays readable. */
+.live-tail { margin: 8px 0 0; padding: 7px 9px; max-height: 42px; overflow: hidden; border: 1px solid #dfe5e2; border-radius: 6px; background: #f4f6f4; color: #4a5a63; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.4 Consolas, monospace; }
+.live-tail.waiting { display: flex; align-items: center; gap: 6px; color: #8a969c; font-style: italic; }
+.policy-note { display: flex; align-items: center; gap: 5px; margin-top: 7px; color: #a8752c; font-size: 10px; line-height: 1.35; }
+
+.run-response label { display: flex; align-items: center; gap: 7px; }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: #d9534f; animation: live-pulse 1.4s ease-in-out infinite; }
+@keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.follow-toggle { margin-left: auto; border: 1px solid var(--line); border-radius: 20px; background: #fff; color: #7d898f; padding: 3px 9px; text-transform: none; letter-spacing: 0; font-size: 9px; font-weight: 700; }
+.follow-toggle.on { border-color: #2f8676; background: #e6f3f0; color: #1b6e60; }
+
+/* --- Per-project worker allowlist -------------------------------------- */
+.allowlist-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.allow-chip { display: flex; align-items: center; gap: 5px; border: 1px solid #2d4553; border-radius: 20px; background: #102635; color: #7e94a1; padding: 5px 11px; font-size: 10px; font-weight: 700; }
+.allow-chip.on { border-color: #2f8676; background: #10453d; color: #b6e6dc; }
+.allow-chip em { color: #6f8794; font-style: normal; font-size: 8px; text-transform: uppercase; letter-spacing: .5px; }
+.allow-chip.on em { color: #77b9ac; }
+.allowlist-hint { display: block; margin-top: 9px; color: #7f98a5; line-height: 1.5; font-size: 10px; }
+.allowlist-hint code { color: #9db4c0; font-size: 9px; overflow-wrap: anywhere; }
+.default-tag { color: #b98a3d; text-transform: uppercase; letter-spacing: .6px; font-size: 8px; font-weight: 700; }

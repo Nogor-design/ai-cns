@@ -32,6 +32,27 @@ def test_init_rejects_missing_path(tmp_path):
     assert "does not exist" in r.output
 
 
+def test_project_worker_allowlist_can_be_inspected_and_updated(git_repo):
+    r = _run(
+        "init", str(git_repo), "--name", "Private App", "--privacy", "restricted",
+        "--no-state",
+    )
+    assert r.exit_code == 0, r.output
+
+    r = _run("project", "workers", "private-app")
+    assert r.exit_code == 0, r.output
+    assert "private-app: ollama" in r.output
+    assert "default for privacy=restricted" in r.output
+
+    r = _run("project", "workers", "private-app", "claude,ollama")
+    assert r.exit_code == 0, r.output
+    assert "may now use: claude, ollama" in r.output
+
+    r = _run("project", "list")
+    assert r.exit_code == 0, r.output
+    assert "claude,ollama" in r.output
+
+
 def test_full_agentic_flow(git_repo):
     assert _run("init", str(git_repo), "--name", "Flow").exit_code == 0
     r = _run("task", "add", "flow", "Add feature", "--type", "code")

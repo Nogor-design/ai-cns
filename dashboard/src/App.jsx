@@ -59,6 +59,46 @@ function executionWorker(run) {
 
 function numberLabel(value) { return new Intl.NumberFormat().format(value || 0) }
 
+// Tail a run's live output. The server returns everything written after a byte
+// offset, so a dropped poll costs one interval rather than the whole transcript.
+function useRunOutput(runId, isRunning) {
+  const [text, setText] = useState('')
+  const [done, setDone] = useState(false)
+  useEffect(() => {
+    if (!runId) { setText(''); setDone(false); return undefined }
+    let cancelled = false, timer = null, offset = 0, failures = 0
+    setText(''); setDone(false)
+    async function tick() {
+      try {
+        const payload = await request(`/api/runs/${runId}/output?offset=${offset}`)
+        if (cancelled) return
+        failures = 0
+        offset = payload.offset
+        // Cap retained text so a very chatty agent cannot grow the tab forever.
+        if (payload.text) setText(prev => (prev + payload.text).slice(-120000))
+        if (payload.running) timer = setTimeout(tick, 1000)
+        else setDone(true)
+      } catch {
+        if (cancelled) return
+        // A run's log may not exist yet, or may have been cleaned up. Back off
+        // a few times, then stop rather than polling a dead endpoint forever.
+        if (++failures > 4) { setDone(true); return }
+        timer = setTimeout(tick, 2000)
+      }
+    }
+    tick()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [runId, isRunning])
+  return { text, done }
+}
+
+function LiveTail({ runId, lines = 2 }) {
+  const { text } = useRunOutput(runId, true)
+  if (!text) return <div className="live-tail waiting"><LoaderCircle className="spin" size={12} />Waiting for the worker to produce output…</div>
+  const tail = text.split('\n').filter(Boolean).slice(-lines).join('\n')
+  return <pre className="live-tail">{tail}</pre>
+}
+
 function gitLabel(project) {
   if (!project.git_check) return 'Not checked'
   if (!project.is_git) return 'Not a Git repository'
@@ -138,7 +178,8 @@ function WorkingLane({ tasks, projects, onStart, onSelect }) {
           <div className="working-top"><span className="project-monogram" style={{ '--project-color': projectColor(projects[task.project_id]) }}>{projects[task.project_id]?.name.slice(0, 2).toUpperCase()}</span><StatusPill value={task.status} /></div>
           <span className="project-kicker">{projects[task.project_id]?.name}</span><h3>{task.title}</h3>
           <div className="working-meta"><WorkerBadge name={task.assignee || task.recommended_worker} /><span>{task.latest_run?.state === 'running' ? `working ${durationLabel(task.latest_run)}` : `${task.route.budget} effort`}</span></div>
-          {task.latest_run?.state === 'running' && <div className="indeterminate-progress"><span /></div>}
+          {task.latest_run?.state === 'running' && <><div className="indeterminate-progress"><span /></div><LiveTail runId={task.latest_run.id} /></>}
+          {task.policy_note && <small className="policy-note"><CircleAlert size={12} />{task.policy_note}</small>}
           {task.status === 'assigned' && !['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()) ? <button className="soft-action" onClick={() => onStart(task)}>Start safely <CirclePlay size={15} /></button> : <button className="text-action" onClick={() => onSelect(task.project_id)}>Open project <ChevronRight size={14} /></button>}
         </article>)}
         {!tasks.length && <div className="lane-empty"><Clock3 size={17} />No agents are assigned yet.</div>}
@@ -220,12 +261,34 @@ function RunActivity({ runs, onView }) {
 }
 
 function RunModal({ run, onClose }) {
+  const live = useRunOutput(run?.id, run?.state === 'running')
+  const bodyRef = useRef(null)
+  const [follow, setFollow] = useState(true)
+  const liveText = live.text
+  useEffect(() => {
+    if (follow && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [liveText, follow])
   if (!run) return null
+  const running = run.state === 'running'
+  // Prefer the live transcript whenever there is one: for a finished run it is
+  // the full session, while `response` is only the worker's final payload.
+  const shown = liveText || run.response || run.human_note || (running
+    ? 'The worker has started. Output will appear here as it arrives.'
+    : 'No output was captured for this run.')
   return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}><section className="run-modal">
-    <div className="modal-head"><div><span className="eyebrow">Execution evidence</span><h2>{run.task_title}</h2><p>{run.project_name}</p></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
+    <div className="modal-head"><div><span className="eyebrow">{running ? 'Live execution' : 'Execution evidence'}</span><h2>{run.task_title}</h2><p>{run.project_name}</p></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <div className="run-facts"><span><small>Status</small><StatusPill value={run.state === 'completed' && run.task_status === 'review' ? 'review' : run.state} /></span><span><small>Executed by</small><WorkerBadge name={executionWorker(run)} /></span><span><small>Duration</small><strong>{durationLabel(run)}</strong></span><span><small>Exit code</small><strong>{run.exit_code ?? 'running'}</strong></span></div>
     <div className="run-dates"><span>Started {run.started_at ? new Date(run.started_at).toLocaleString() : '—'}</span><span>{run.ended_at ? `Finished ${new Date(run.ended_at).toLocaleString()}` : 'Still running'}</span><code>{run.id}</code></div>
-    <div className="run-response"><label>Captured worker result</label><pre>{run.response || run.human_note || (run.state === 'running' ? 'The worker process is active. Its final response will appear here when it finishes.' : 'No response was captured.')}</pre></div>
+    <div className="run-response">
+      <label>{running ? <><span className="live-dot" />Live worker output</> : 'Captured worker output'}
+        {running && <button className={`follow-toggle ${follow ? 'on' : ''}`} onClick={() => setFollow(value => !value)}>{follow ? 'Following' : 'Paused'}</button>}
+      </label>
+      <pre ref={bodyRef} onScroll={event => {
+        const el = event.currentTarget
+        // Scrolling up pauses auto-follow so reading earlier output is possible.
+        setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
+      }}>{shown}</pre>
+    </div>
   </section></div>
 }
 
@@ -235,12 +298,34 @@ function ProjectsTable({ projects, selectedId, onSelect, onPlan }) {
   </tbody></table></div></section>
 }
 
-function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual }) {
+const ALLOWLIST_CHOICES = ['codex', 'claude', 'gemini', 'grok', 'ollama', 'perplexity']
+
+function WorkerAllowlist({ project, onChange }) {
+  const allowed = new Set(project.allowed_workers || [])
+  function toggle(name) {
+    const next = new Set(allowed)
+    if (next.has(name)) next.delete(name); else next.add(name)
+    if (!next.size) return   // a project must keep at least one worker
+    onChange(project.project_id, [...next])
+  }
+  return <section className="allowlist">
+    <div className="drawer-section-head"><label>Workers allowed to read this repo</label>{!project.allowlist_configured && <small className="default-tag">default</small>}</div>
+    <div className="allowlist-grid">
+      {ALLOWLIST_CHOICES.map(name => <button key={name} type="button" className={`allow-chip ${allowed.has(name) ? 'on' : ''}`} onClick={() => toggle(name)} aria-pressed={allowed.has(name)}>
+        {allowed.has(name) ? <Check size={12} /> : <X size={12} />}{workers[name]?.label || name}{name === 'ollama' && <em>local</em>}
+      </button>)}
+    </div>
+    <small className="allowlist-hint">Only these workers may see <code>{project.repo_path}</code>. Cortex routes around the rest instead of blocking the task.</small>
+  </section>
+}
+
+function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist }) {
   if (!project) return null
   return <aside className="drawer"><div className="drawer-head"><div><span className="project-monogram large" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span><span><small>{project.program}</small><h2>{project.name}</h2></span></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <div className="drawer-primary"><button onClick={() => onPlan(project.project_id, 'codex')}><Sparkles size={16} />Ask Codex to plan next</button><button onClick={() => onPlan(project.project_id, 'ollama')}><Cpu size={16} />Use local planner</button></div>
     <section><label>Current goal</label><p>{project.current_goal || 'No goal has been set.'}</p></section>
     <section className="drawer-evidence"><label>Repository evidence</label><div><GitBranch size={14} />{project.branch || 'Not under Git'}<span>{gitLabel(project)}</span></div>{project.warnings?.[0] && <small><AlertTriangle size={13} />{project.warnings[0]}</small>}</section>
+    <WorkerAllowlist project={project} onChange={onAllowlist} />
     <section><div className="drawer-section-head"><label>Active work ({project.tasks.length})</label><button onClick={() => onManual(project.project_id)}><Plus size={13} />Manual</button></div><div className="drawer-task-list">{project.tasks.map(task => <div className="drawer-task" key={task.id}><div><strong>{task.title}</strong><span><StatusPill value={task.status} /><WorkerBadge name={task.execution_worker} /></span><small>{task.execution_model || 'default model'} · {task.execution_effort || 'auto'} effort</small></div><div>{task.status === 'assigned' && !['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()) && <button onClick={() => onStart(task)}><CirclePlay size={14} />Start</button>}<select aria-label="Model" value={task.requested_model || ''} onChange={event => onTaskUpdate(task.id, { requested_model: event.target.value || null })}><option value="">Auto model</option><option value="grok-4.5">grok-4.5</option><option value="sonnet">Claude Sonnet</option><option value="opus">Claude Opus</option></select><select aria-label="Effort" value={task.effort || ''} onChange={event => onTaskUpdate(task.id, { effort: event.target.value || null })}><option value="">Auto effort</option>{['low', 'medium', 'high', 'xhigh'].map(value => <option key={value}>{value}</option>)}</select><select aria-label="Status" value={task.status} onChange={event => onTaskUpdate(task.id, { status: event.target.value })}>{statuses.map(status => <option key={status} value={status}>{pretty(status)}</option>)}</select></div></div>)}{!project.tasks.length && <div className="lane-empty">No active tasks.</div>}</div></section>
     <div className="drawer-path"><FolderGit2 size={14} /><span title={project.repo_path}>{project.repo_path}</span></div>
   </aside>
@@ -351,6 +436,7 @@ export default function App() {
   }
 
   async function updateTask(id, fields) { try { await request(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }); setToast('Task updated'); await load(true) } catch (err) { setError(err.message) } }
+  async function updateAllowlist(projectId, allowed) { try { await request(`/api/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify({ allowed_workers: allowed }) }); setToast(`Allowlist updated: ${allowed.join(', ')}`); await load(true) } catch (err) { setError(err.message) } }
   async function dismissSuggestion(id) { try { await request(`/api/suggestions/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'dismissed' }) }); setToast('Suggestion dismissed'); await load(true) } catch (err) { setError(err.message) } }
   async function keepTeamWorking() { try { const payload = await request('/api/team/keep-working', { method: 'POST', body: JSON.stringify({ limit: 3 }) }); if (!payload.job_ids.length) { setToast('No safe approved assignments are waiting; ask the PM to plan a project'); await load(true); return } watchJob(payload.job_ids[0], 'Starting team') } catch (err) { setError(err.message) } }
   async function refreshGit() { try { const payload = await request('/api/git/refresh', { method: 'POST', body: JSON.stringify({ fetch: true }) }); watchJob(payload.job_id, 'Checking GitHub') } catch (err) { setError(err.message) } }
@@ -376,7 +462,7 @@ export default function App() {
         <ProjectsTable projects={filteredProjects} selectedId={selectedId} onSelect={setSelectedId} onPlan={id => planProject(id)} />
         <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges or external actions</span></footer>
       </div>
-    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} /></div>
+    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} /></div>
     {manualProject !== undefined && <ManualTaskModal projects={data.projects} initialProject={manualProject || ''} onClose={() => setManualProject(undefined)} onCreated={async () => { setManualProject(undefined); setToast('Manual task added'); await load(true) }} />}
     <RunModal run={selectedRun} onClose={() => setSelectedRun(null)} />
     {toast && <div className="toast"><Check size={15} />{toast}</div>}

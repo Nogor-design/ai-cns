@@ -1,3 +1,3 @@
 """AI-CNS Cortex-Lite: local memory-and-context layer across projects and models."""
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

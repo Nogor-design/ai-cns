@@ -4,14 +4,28 @@ Single file, zero config (spec section 4). The canonical project state lives as
 a git-tracked markdown file inside each repo; this database indexes and links to
 it rather than owning it. Model performance is a VIEW over `runs`, never a stored
 table, so it can never go stale.
+
+Several agents and the dashboard poll this database concurrently, so connections
+are configured for concurrent use: WAL journaling lets readers proceed while a
+worker writes, and a generous busy timeout absorbs the short write bursts that
+dispatch produces. Schema setup runs once per database rather than on every
+connect, because the dashboard opens a connection per HTTP request.
 """
 
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 from . import config
+
+# Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
+SCHEMA_VERSION = 3
+
+# Long enough to outlast the write bursts at the start and end of a dispatch,
+# short enough that a genuine deadlock still surfaces as an error.
+BUSY_TIMEOUT_MS = 30_000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -26,6 +40,9 @@ CREATE TABLE IF NOT EXISTS projects (
     state_mode    TEXT NOT NULL DEFAULT 'tracked',  -- tracked | deferred
     current_goal  TEXT,
     test_command  TEXT,
+    -- JSON array of worker names permitted to see this repository. NULL means
+    -- "not configured yet"; the policy layer supplies a privacy-based default.
+    allowed_workers TEXT,
     updated_at    TEXT NOT NULL
 );
 
@@ -112,6 +129,27 @@ CREATE TABLE IF NOT EXISTS suggestions (
     updated_at         TEXT NOT NULL
 );
 
+-- Background work started by the dashboard. Persisted rather than held in
+-- memory so a restart can report what was interrupted instead of silently
+-- losing runs that the UI still shows as active.
+CREATE TABLE IF NOT EXISTS jobs (
+    id           TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,          -- plan | dispatch | git
+    status       TEXT NOT NULL,          -- running | done | failed | interrupted
+    task_id      TEXT,
+    project_id   TEXT,
+    run_id       TEXT,
+    label        TEXT,
+    result_json  TEXT,
+    error        TEXT,
+    pid          INTEGER,                -- owning dashboard process
+    created_at   TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+
 CREATE TABLE IF NOT EXISTS project_git_checks (
     project_id      TEXT PRIMARY KEY REFERENCES projects(id),
     is_git          INTEGER NOT NULL DEFAULT 0,
@@ -161,6 +199,7 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "priority": "INTEGER NOT NULL DEFAULT 3",
         "privacy": "TEXT NOT NULL DEFAULT 'internal'",
         "state_mode": "TEXT NOT NULL DEFAULT 'tracked'",
+        "allowed_workers": "TEXT",
     },
     "tasks": {
         "risk": "TEXT NOT NULL DEFAULT 'auto'",
@@ -200,13 +239,53 @@ def _apply_additive_migrations(conn: sqlite3.Connection) -> None:
                 )
 
 
-def connect(path: str | Path | None = None) -> sqlite3.Connection:
-    """Open a connection with sane defaults and the schema applied."""
-    target = Path(path) if path is not None else config.db_path()
-    conn = sqlite3.connect(str(target))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+class Connection(sqlite3.Connection):
+    """A connection whose ``with`` block also closes it.
+
+    ``sqlite3``'s own context manager commits or rolls back but deliberately
+    leaves the connection open. Every dashboard request opens one, so relying on
+    the default leaks a handle per poll; closing on exit keeps request-scoped
+    usage honest.
+    """
+
+    def __exit__(self, exc_type, exc, tb):  # type: ignore[no-untyped-def]
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
+_initialised: set[str] = set()
+_init_lock = threading.Lock()
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Create or upgrade the schema, at most once per database per process."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
     conn.executescript(SCHEMA)
     _apply_additive_migrations(conn)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
+
+
+def connect(path: str | Path | None = None) -> Connection:
+    """Open a connection configured for concurrent dashboard and worker use."""
+    target = Path(path) if path is not None else config.db_path()
+    key = str(target.resolve() if target.parent.exists() else target)
+    conn = sqlite3.connect(str(target), timeout=BUSY_TIMEOUT_MS / 1000, factory=Connection)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    # WAL lets the dashboard keep reading while a dispatch writes. It is a
+    # persistent property of the file, so setting it once would do; it is cheap
+    # to assert and keeps freshly created databases correct.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    if key not in _initialised:
+        with _init_lock:
+            if key not in _initialised:
+                _ensure_schema(conn)
+                _initialised.add(key)
     return conn

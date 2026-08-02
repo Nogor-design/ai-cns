@@ -29,6 +29,7 @@ from . import (
     health,
     ids,
     pm as pm_mod,
+    policy,
     routing as routing_mod,
     runs as runs_mod,
     state as state_mod,
@@ -893,10 +894,45 @@ def project_list():
         typer.echo("(no projects; run `cortex init <repo_path>`)")
         return
     for p in rows:
+        allowed = ",".join(policy.allowed_workers(p))
+        marker = " " if policy.is_configured(p) else "*"
         typer.echo(
             f"{p['id']:<20} [{p['status']:<8}] P{p['priority']} "
-            f"{p['program']:<14} {p['privacy']:<10} {p['repo_path']}"
+            f"{p['program']:<14} {p['privacy']:<10} {marker}{allowed:<28} {p['repo_path']}"
         )
+    typer.echo("\n* = default allowlist; set one with `cortex project workers <id> ...`")
+
+
+@project_app.command("workers")
+def project_workers(
+    project: str = typer.Argument(..., help="Project id or name."),
+    workers_csv: str = typer.Argument(
+        None,
+        metavar="[WORKERS]",
+        help="Comma-separated worker list, e.g. claude,ollama. Omit to show.",
+    ),
+):
+    """Show or set which AI workers may read this project's repository."""
+    conn = _conn()
+    try:
+        proj = store.get_project(conn, project)
+    except store.NotFound as exc:
+        _err(str(exc))
+    if not workers_csv:
+        typer.echo(f"{proj['id']}: {', '.join(policy.allowed_workers(proj))}")
+        if not policy.is_configured(proj):
+            typer.echo(f"(default for privacy={proj['privacy']}; not explicitly set)")
+        return
+    names = [part.strip() for part in workers_csv.replace(",", " ").split() if part.strip()]
+    try:
+        store.update_project(conn, proj["id"], allowed_workers=policy.encode(names))
+    except ValueError as exc:
+        _err(str(exc))
+    updated = store.get_project(conn, proj["id"])
+    typer.secho(
+        f"{proj['id']} may now use: {', '.join(policy.allowed_workers(updated))}",
+        fg=typer.colors.GREEN,
+    )
 
 
 @project_app.command("update")

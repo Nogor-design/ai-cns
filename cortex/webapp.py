@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import sqlite3
 import threading
 import webbrowser
@@ -17,9 +18,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from . import config, db, dispatcher, git_monitor, health, ids, pm, routing, store, team, workers
+from . import (
+    config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy, routing,
+    runlog, store, team, workers,
+)
 
 WORKER_NAMES = ("codex", "claude", "gemini", "grok", "ollama", "perplexity")
 ACTIVE_TASK_STATUSES = {"open", "assigned", "in_progress", "running", "review", "blocked"}
@@ -29,7 +33,7 @@ TASK_MUTABLE_FIELDS = {
 }
 PROJECT_MUTABLE_FIELDS = {
     "status", "program", "priority", "privacy", "state_mode", "current_goal",
-    "test_command",
+    "test_command", "allowed_workers",
 }
 
 
@@ -45,7 +49,7 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     health_rows = {
         row.project_id: row
         for row in health.inspect_portfolio(
-            conn, include_paused=True, live_git=False
+            conn, include_paused=True, live_git=False, scan_activity=False
         )
     }
     git_checks = {row["project_id"]: _row_dict(row) for row in store.list_git_checks(conn)}
@@ -75,6 +79,7 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             else "failed" if run["exit_code"] not in {None, 0}
             else "completed"
         )
+        item["log_bytes"] = runlog.size(run["id"])
         run_payloads.append(item)
         latest_run_by_task.setdefault(run["task_id"], item)
 
@@ -91,17 +96,17 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     for task in task_rows:
         project = projects_by_id[task["project_id"]]
         route = routing.route_task(project, task)
+        # What dispatch will actually do, so the card and the run agree.
+        effective = routing.effective_route(project, task)
         item = _row_dict(task)
         item["route"] = asdict(route)
         item["recommended_worker"] = route.worker
         item["recommended_model"] = route.model
-        assigned_worker = str(task["assignee"] or "").lower()
-        item["execution_worker"] = assigned_worker or route.worker
-        item["execution_model"] = (
-            task["requested_model"]
-            or (route.model if not assigned_worker or assigned_worker == route.worker else "default")
-        )
-        item["execution_effort"] = task["effort"] or route.effort
+        item["execution_worker"] = effective.worker
+        item["execution_model"] = task["requested_model"] or effective.model
+        item["execution_effort"] = task["effort"] or effective.effort
+        item["policy_note"] = effective.policy_note
+        item["blocked_reason"] = effective.blocked_reason
         item["latest_run"] = latest_run_by_task.get(task["id"])
         task_payloads.append(item)
         project_task_index[task["project_id"]].append(item)
@@ -127,6 +132,8 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             stack=project["stack"],
             test_command=project["test_command"],
             updated_at=project["updated_at"],
+            allowed_workers=list(policy.allowed_workers(project)),
+            allowlist_configured=policy.is_configured(project),
         )
         item["git_check"] = git_checks.get(project["id"])
         if item["git_check"]:
@@ -266,6 +273,11 @@ def _now_iso() -> str:
 
 class CortexDashboardServer(ThreadingHTTPServer):
     daemon_threads = True
+    # HTTPServer enables SO_REUSEADDR, which on Windows lets a second process
+    # bind a port that is already being listened on. The old server keeps
+    # serving, so a restart appears to succeed while still running stale code.
+    # Failing to bind is the honest outcome.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(
         self,
@@ -278,45 +290,54 @@ class CortexDashboardServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.database_path = database_path
         self.static_root = static_root
-        self._jobs: dict[str, dict[str, Any]] = {}
-        self._jobs_lock = threading.Lock()
+        with db.connect(database_path) as conn:
+            interrupted = jobs.reconcile(conn)
+        if interrupted:
+            print(f"dashboard: closed {interrupted} job(s) left by a previous run")
 
-    def start_job(self, kind: str, target: Any) -> str:
-        job_id = ids.short_id()
-        with self._jobs_lock:
-            self._jobs[job_id] = {
-                "id": job_id, "kind": kind, "status": "running",
-                "created_at": _now_iso(), "result": None, "error": None,
-            }
+    def start_job(
+        self,
+        kind: str,
+        target: Any,
+        *,
+        label: str | None = None,
+        task_id: str | None = None,
+        project_id: str | None = None,
+    ) -> str:
+        """Record a job, then run it on a background thread.
+
+        ``target`` receives the job id so a dispatch can associate itself with
+        the run it creates while that run is still in progress.
+        """
+        with db.connect(self.database_path) as conn:
+            job_id = jobs.create(
+                conn, kind=kind, label=label, task_id=task_id, project_id=project_id
+            )
+
+        database_path = self.database_path
 
         def run() -> None:
             try:
-                result = target()
-                with self._jobs_lock:
-                    self._jobs[job_id].update(
-                        status="done", result=result, completed_at=_now_iso()
-                    )
+                result = target(job_id)
+                status, error = "done", None
             except Exception as exc:  # worker failures are reported to the local UI
-                with self._jobs_lock:
-                    self._jobs[job_id].update(
-                        status="failed", error=str(exc), completed_at=_now_iso()
-                    )
+                result, status, error = None, "failed", str(exc)
+            try:
+                with db.connect(database_path) as conn:
+                    jobs.finish(conn, job_id, status=status, result=result, error=error)
+            except sqlite3.Error as exc:
+                print(f"dashboard: could not record job {job_id}: {exc}")
 
         threading.Thread(target=run, name=f"cortex-{kind}-{job_id}", daemon=True).start()
         return job_id
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
-        with self._jobs_lock:
-            job = self._jobs.get(job_id)
-            return dict(job) if job else None
+        with db.connect(self.database_path) as conn:
+            return jobs.get(conn, job_id)
 
     def list_jobs(self) -> list[dict[str, Any]]:
-        with self._jobs_lock:
-            return sorted(
-                (dict(job) for job in self._jobs.values()),
-                key=lambda job: job["created_at"],
-                reverse=True,
-            )[:30]
+        with db.connect(self.database_path) as conn:
+            return jobs.recent(conn, limit=30)
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -345,7 +366,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 self._json(HTTPStatus.OK, {"job": job})
             return
+        if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "output":
+            self._run_output(parts[2], urlparse(self.path).query)
+            return
+        if path.startswith("/api/"):
+            self._json(HTTPStatus.NOT_FOUND, {"error": "route not found"})
+            return
         self._serve_static(path)
+
+    def _run_output(self, run_id: str, query: str) -> None:
+        """Return live worker output written after a byte offset.
+
+        Polling with an explicit offset rather than streaming keeps this on the
+        same simple request model as the rest of the API, and means a dropped
+        connection costs one poll instead of restarting the transcript.
+        """
+        params = parse_qs(query)
+        try:
+            offset = max(0, int(params.get("offset", ["0"])[0]))
+        except ValueError:
+            offset = 0
+        with db.connect(self.server.database_path) as conn:
+            row = conn.execute(
+                "SELECT id, ended_at, exit_code FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        if row is None:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "run not found"})
+            return
+        text, new_offset = runlog.read_from(run_id, offset)
+        self._json(
+            HTTPStatus.OK,
+            {
+                "run_id": run_id,
+                "text": text,
+                "offset": new_offset,
+                "running": row["ended_at"] is None,
+                "exit_code": row["exit_code"],
+            },
+        )
 
     def do_POST(self) -> None:  # noqa: N802
         path = unquote(urlparse(self.path).path)
@@ -489,7 +547,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     ) -> str:
         database_path = self.server.database_path
 
-        def target() -> dict[str, Any]:
+        def target(job_id: str) -> dict[str, Any]:
             with db.connect(database_path) as conn:
                 project = store.get_project(conn, project_id)
                 return asdict(pm.plan_project(
@@ -497,35 +555,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     allow_cloud=allow_cloud,
                 ))
 
-        return self.server.start_job("plan", target)
+        return self.server.start_job(
+            "plan", target, label="Planning", project_id=project_id
+        )
 
     def _start_dispatch_job(
         self, task_id: str, *, allow_write: bool, approve_high_risk: bool
     ) -> str:
         database_path = self.server.database_path
 
-        def target() -> dict[str, Any]:
+        def target(job_id: str) -> dict[str, Any]:
             with db.connect(database_path) as conn:
                 task = store.get_task(conn, task_id)
+                # Publish the run id as soon as it exists so the dashboard can
+                # start tailing output while the worker is still thinking.
                 result = dispatcher.dispatch(
                     conn, task, allow_write=allow_write,
                     approve_high_risk=approve_high_risk,
+                    on_run_start=lambda run_id: jobs.attach_run(conn, job_id, run_id),
                 )
                 payload = asdict(result)
                 payload["workspace"] = str(payload["workspace"])
                 return payload
 
-        return self.server.start_job("dispatch", target)
+        with db.connect(database_path) as conn:
+            project_id = store.get_task(conn, task_id)["project_id"]
+        return self.server.start_job(
+            "dispatch", target, label="Working", task_id=task_id,
+            project_id=project_id,
+        )
 
     def _start_git_job(self, *, fetch: bool) -> str:
         database_path = self.server.database_path
 
-        def target() -> dict[str, Any]:
+        def target(job_id: str) -> dict[str, Any]:
             with db.connect(database_path) as conn:
                 rows = git_monitor.refresh_portfolio(conn, fetch=fetch)
                 return {"checked": len(rows), "fetched": fetch}
 
-        return self.server.start_job("git", target)
+        return self.server.start_job("git", target, label="Checking GitHub")
 
     def _body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))

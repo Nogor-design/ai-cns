@@ -5,11 +5,15 @@ from __future__ import annotations
 import fnmatch
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import brief as brief_mod
-from . import config, evidence, gitutil, ids, routing, runs, secrets_scan, store, workers, worktrees
+from . import (
+    config, evidence, gitutil, ids, policy, routing, runlog, runs, secrets_scan,
+    store, workers, worktrees,
+)
 
 
 class DispatchError(RuntimeError):
@@ -47,13 +51,20 @@ def preview(
     action_override: str | None = None,
 ) -> DispatchPreview:
     project = store.get_project(conn, task["project_id"])
-    route = routing.route_task(project, task)
-    explicit_assignee = str(task["assignee"] or "").lower()
-    if not worker_override and explicit_assignee in {
-        "codex", "claude", "gemini", "grok", "ollama"
-    }:
-        worker_override = explicit_assignee
-    route = _with_overrides(route, worker_override, model_override, action_override)
+    # A caller-supplied worker is a live instruction and is honoured verbatim:
+    # if it is not permitted, dispatch says so rather than running something
+    # else. Otherwise the effective route applies -- stored assignee first,
+    # then project policy -- so this agrees with what the dashboard predicted.
+    if worker_override:
+        route = _with_overrides(
+            routing.route_task(project, task),
+            worker_override, model_override, action_override,
+        )
+    else:
+        route = _with_overrides(
+            routing.effective_route(project, task),
+            None, model_override, action_override,
+        )
     compiled = brief_mod.compile_brief(
         conn,
         project,
@@ -64,12 +75,17 @@ def preview(
     )
     compiled_text = compiled.text
     if route.worker == "ollama":
+        # Ollama cannot read the repository itself, so the relevant files are
+        # inlined into its brief; the CLI workers open the workspace directly.
         compiled_text += "\n" + evidence.bundle(
             project["repo_path"], patterns_text=task["allowed_paths"]
         )
-        findings = secrets_scan.scan(compiled_text, use_ollama=False)
-        if findings:
-            raise brief_mod.SecretsDetected(findings)
+    # Scan whatever is about to be handed to a worker, local or not. Previously
+    # only the Ollama brief was scanned, which meant the text most likely to
+    # leave the machine was the one text never checked.
+    findings = secrets_scan.scan(compiled_text, use_ollama=False)
+    if findings:
+        raise brief_mod.SecretsDetected(findings)
 
     workspace = Path(project["repo_path"])
     brief_path = config.run_root() / task["id"] / "brief.md"
@@ -100,6 +116,7 @@ def dispatch(
     allow_write: bool = False,
     approve_high_risk: bool = False,
     timeout: int = 1800,
+    on_run_start: Callable[[str], None] | None = None,
 ) -> DispatchResult:
     project = store.get_project(conn, task["project_id"])
     planned = preview(
@@ -112,10 +129,17 @@ def dispatch(
     route = planned.route
     if planned.command is None:
         raise DispatchError(planned.note or "no executable worker command")
-    if route.requires_approval and not approve_high_risk:
-        raise DispatchError("high-risk route requires --approve-high-risk")
-    if project["privacy"] == "restricted" and route.worker != "ollama" and not approve_high_risk:
-        raise DispatchError("restricted project requires local Ollama or explicit approval")
+    # Privacy is enforced in exactly one place: the project's worker allowlist.
+    # Risk no longer blocks read-only work, because a review that cannot run is
+    # not safer than one that can -- it is just invisible. Blast radius is
+    # governed separately by allow_write below.
+    if route.blocked_reason:
+        raise DispatchError(route.blocked_reason)
+    if not policy.is_allowed(project, route.worker):
+        raise DispatchError(
+            f"{route.worker} is not on {project['name']}'s allowlist "
+            f"(allowed: {', '.join(policy.allowed_workers(project))})"
+        )
 
     write = route.action == "implement"
     workspace = Path(project["repo_path"])
@@ -162,11 +186,24 @@ def dispatch(
         captured_via="cli",
         effort=route.effort,
     )
+    if on_run_start:
+        on_run_start(run_id)
+    runlog.start(
+        run_id,
+        header=(
+            f"# {route.worker}:{route.model} ({route.effort or 'auto'} effort)\n"
+            f"# {task['title']}\n"
+            f"# workspace: {workspace}\n"
+            f"# started: {ids.now()}\n\n"
+        ),
+    )
     try:
         result = workers.execute(
-            command, workspace=workspace, brief=planned.brief, timeout=timeout
+            command, workspace=workspace, brief=planned.brief, timeout=timeout,
+            on_output=lambda text: runlog.append(run_id, text),
         )
     except workers.WorkerError as exc:
+        runlog.append(run_id, f"\n[cortex] run failed: {exc}\n")
         store.update_run(
             conn,
             run_id,
@@ -202,7 +239,8 @@ def dispatch(
         files_changed=changed,
         diff_size=size,
         tests_passed=tests_passed,
-        response=result.stdout,
+        # The readable answer; the full envelope stays in the run log.
+        response=workers.extract_text(result.stdout),
         human_note=(
             result.stderr[-4000:]
             if result.stderr and result.exit_code != 0
@@ -214,6 +252,13 @@ def dispatch(
         exit_code=result.exit_code,
     )
     store.update_task(conn, task["id"], status=task_status)
+    runlog.append(
+        run_id,
+        f"\n[cortex] finished with exit code {result.exit_code}; "
+        f"task is now '{task_status}'.\n"
+        + (f"[cortex] files changed: {', '.join(changed)}\n" if changed else "")
+        + (f"[cortex] path-scope violations: {', '.join(violations)}\n" if violations else ""),
+    )
     return DispatchResult(
         run_id=run_id,
         task_status=task_status,
@@ -254,13 +299,7 @@ def _with_overrides(
         previous_worker = values["worker"]
         values["worker"] = worker
         if not model and previous_worker != worker:
-            values["model"] = {
-                "codex": "default",
-                "claude": "sonnet",
-                "gemini": "default",
-                "grok": "default",
-                "ollama": "phi4:14b",
-            }.get(worker, values["model"])
+            values["model"] = routing.DEFAULT_MODELS.get(worker, values["model"])
     if model:
         values["model"] = model
     if action:
