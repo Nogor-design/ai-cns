@@ -66,16 +66,34 @@ def _deterministic(project: sqlite3.Row, conn: sqlite3.Connection, previous: str
     """Build a compact state doc straight from the database (no model)."""
     pid = project["id"]
     open_tasks = store.list_tasks(conn, pid)
-    open_lines = [
-        f"- [ ] {t['title']} ({t['type']})"
-        for t in open_tasks
-        if t["status"] in ("open", "in_progress")
-    ] or ["- [ ] <none>"]
+    active_statuses = {"open", "assigned", "in_progress", "running", "review", "blocked"}
+    open_lines = []
+    for task in open_tasks:
+        if task["status"] not in active_statuses:
+            continue
+        details = [task["type"], task["status"]]
+        if task["assignee"]:
+            details.append(f"owner: {task['assignee']}")
+        details.append(f"progress: {task['progress']}%")
+        if task["next_action"]:
+            details.append(f"next: {task['next_action']}")
+        if task["blocked_reason"]:
+            details.append(f"blocked: {task['blocked_reason']}")
+        open_lines.append(f"- [ ] {task['title']} ({'; '.join(details)})")
+    if not open_lines:
+        open_lines = ["- [ ] <none>"]
 
     decisions = store.recent_decisions(conn, pid, limit=10)
     dec_lines = [
         f"- {d['ts'][:10]} — {d['decision']} — {d['rationale'] or ''} — source: {d['source']}"
         for d in decisions
+    ] or ["- <none yet>"]
+
+    activity = store.list_activity_events(conn, pid, limit=10)
+    activity_lines = [
+        f"- {event['occurred_at'][:16]} — {event['actor_name'] or event['actor_type']} — "
+        f"{event['summary']} ({event['action']})"
+        for event in activity
     ] or ["- <none yet>"]
 
     # Preserve human-authored sections from the previous doc where the DB has
@@ -109,6 +127,9 @@ _Last updated: {ids.today()} by Cortex_
 
 ## Recent decisions (last ~10, newest first)
 {chr(10).join(dec_lines)}
+
+## Recent activity (last 10, newest first)
+{chr(10).join(activity_lines)}
 
 ## Known risks / assumptions
 {risks}

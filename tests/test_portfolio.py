@@ -56,6 +56,50 @@ def test_additive_migration_upgrades_old_database(tmp_path):
         "priority", "assignee", "requested_model", "effort", "due_at",
     } <= task_columns
     assert {"workspace_path", "command_json", "usage_json", "effort", "exit_code"} <= run_columns
+    assert {"remote_url", "github_owner", "github_repo", "codex_project_id"} <= project_columns
+    assert {
+        "parent_id", "progress", "blocked_reason", "next_action", "codex_thread_id",
+        "pm_session_id",
+    } <= task_columns
+    assert upgraded.execute("pragma user_version").fetchone()[0] == 5
+    assert upgraded.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='activity_events'"
+    ).fetchone()
+
+
+def test_early_v4_database_receives_final_pm_session_columns(tmp_path):
+    path = tmp_path / "early-v4.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY, name TEXT, repo_path TEXT, stack TEXT,
+          status TEXT, current_goal TEXT, test_command TEXT, updated_at TEXT
+        );
+        CREATE TABLE tasks (
+          id TEXT PRIMARY KEY, project_id TEXT, title TEXT, type TEXT,
+          status TEXT, brief TEXT, created_at TEXT, updated_at TEXT
+        );
+        CREATE TABLE activity_events (
+          id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT,
+          actor_type TEXT, actor_name TEXT, action TEXT, summary TEXT,
+          source TEXT, occurred_at TEXT, evidence_json TEXT
+        );
+        PRAGMA user_version = 4;
+        """
+    )
+    conn.close()
+
+    from cortex import db
+
+    upgraded = db.connect(path)
+    task_columns = {row[1] for row in upgraded.execute("pragma table_info(tasks)")}
+    activity_columns = {
+        row[1] for row in upgraded.execute("pragma table_info(activity_events)")
+    }
+    assert "pm_session_id" in task_columns
+    assert "session_id" in activity_columns
+    assert upgraded.execute("pragma user_version").fetchone()[0] == 5
 
 
 def test_health_detects_dirty_repo(conn, project, git_repo):

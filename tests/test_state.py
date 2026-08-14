@@ -17,13 +17,21 @@ def test_scaffold_has_all_sections(project):
 
 
 def test_regen_deterministic_includes_open_tasks_and_decisions(conn, project):
-    store.create_task(conn, project_id=project["id"], title="Wire the API", type="code")
+    task_id = store.create_task(
+        conn, project_id=project["id"], title="Wire the API", type="code",
+        assignee="codex", next_action="Run the contract tests",
+    )
+    store.update_task(conn, task_id, status="running", progress=40)
     store.create_decision(
         conn, project_id=project["id"], decision="pick sqlite", rationale="zero config"
     )
     content = state_mod.regen(conn, project, use_ollama=False)
     assert "Wire the API" in content
     assert "pick sqlite" in content
+    assert "owner: codex" in content
+    assert "progress: 40%" in content
+    assert "next: Run the contract tests" in content
+    assert "## Recent activity" in content
     # Written to disk too.
     assert state_mod.read_state(project["repo_path"]) == content
 

@@ -47,8 +47,12 @@ app = typer.Typer(
 )
 task_app = typer.Typer(help="Manage tasks.", no_args_is_help=True)
 project_app = typer.Typer(help="Manage projects.", no_args_is_help=True)
+pm_session_app = typer.Typer(help="Track durable PM sessions and attribution.", no_args_is_help=True)
+activity_app = typer.Typer(help="Inspect append-only portfolio activity.", no_args_is_help=True)
 app.add_typer(task_app, name="task")
 app.add_typer(project_app, name="project")
+app.add_typer(pm_session_app, name="pm")
+app.add_typer(activity_app, name="activity")
 
 
 def _configure_console_encoding() -> None:
@@ -816,6 +820,13 @@ def task_add(
     model: str = typer.Option(None, "--model", help="Requested model for this assignment."),
     effort: str = typer.Option(None, "--effort", help="low | medium | high | xhigh."),
     due_at: str = typer.Option(None, "--due", help="Optional ISO date or datetime."),
+    parent_id: str = typer.Option(None, "--parent"),
+    milestone: str = typer.Option(None, "--milestone"),
+    next_action: str = typer.Option(None, "--next-action"),
+    thread_id: str = typer.Option(None, "--thread"),
+    github_issue_url: str = typer.Option(None, "--github-issue"),
+    actor: str = typer.Option("owner", "--actor"),
+    actor_type: str = typer.Option("human", "--actor-type", help="human | agent | system"),
 ):
     """Create a task and print its id."""
     conn = _conn()
@@ -839,6 +850,14 @@ def task_add(
         requested_model=model,
         effort=effort,
         due_at=due_at,
+        parent_id=parent_id,
+        milestone=milestone,
+        next_action=next_action,
+        codex_thread_id=thread_id,
+        github_issue_url=github_issue_url,
+        actor_type=actor_type,
+        actor_name=actor,
+        source="cli",
     )
     typer.secho(f"created task {tid}", fg=typer.colors.GREEN)
     typer.echo(tid)
@@ -883,6 +902,161 @@ def task_show(task_id: str = typer.Argument(..., help="Task id.")):
     typer.echo(f"acceptance:  {task['acceptance'] or '-'}")
     typer.echo(f"paths:       {task['allowed_paths'] or '-'}")
     typer.echo(f"instructions:{' ' + task['brief'] if task['brief'] else ' -'}")
+
+
+@task_app.command("depend")
+def task_depend(
+    task_id: str = typer.Argument(..., help="Blocked task id."),
+    depends_on: str = typer.Argument(..., help="Task id that must finish first."),
+    actor: str = typer.Option("codex", "--actor", help="Who recorded the dependency."),
+):
+    """Record a finish-to-start blocking dependency."""
+    conn = _conn()
+    try:
+        store.add_task_dependency(
+            conn, task_id, depends_on, actor_name=actor, source="cli"
+        )
+    except (store.NotFound, ValueError) as exc:
+        _err(str(exc))
+    typer.secho(f"{task_id} is blocked by {depends_on}", fg=typer.colors.GREEN)
+
+
+@task_app.command("undepend")
+def task_undepend(
+    task_id: str = typer.Argument(..., help="Previously blocked task id."),
+    depends_on: str = typer.Argument(..., help="Dependency task id to remove."),
+    actor: str = typer.Option("codex", "--actor"),
+):
+    """Remove a blocking dependency and preserve the change in activity."""
+    conn = _conn()
+    try:
+        store.remove_task_dependency(
+            conn, task_id, depends_on, actor_name=actor, source="cli"
+        )
+    except (store.NotFound, ValueError) as exc:
+        _err(str(exc))
+    typer.secho(f"removed dependency {task_id} -> {depends_on}", fg=typer.colors.GREEN)
+
+
+@activity_app.command("list")
+def activity_list(
+    project: str = typer.Option(None, "--project", help="Project id or name."),
+    task_id: str = typer.Option(None, "--task"),
+    session_id: str = typer.Option(None, "--session"),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """List activity by project, work item, or PM session."""
+    conn = _conn()
+    project_id = None
+    if project:
+        try:
+            project_id = store.get_project(conn, project)["id"]
+        except store.NotFound as exc:
+            _err(str(exc))
+    rows = store.list_activity_events(
+        conn, project_id, task_id=task_id, session_id=session_id, limit=limit
+    )
+    payload = [{key: row[key] for key in row.keys()} for row in rows]
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    if not payload:
+        typer.echo("(no activity)")
+        return
+    for event in payload:
+        typer.echo(
+            f"{event['occurred_at']}  {event['actor_name'] or event['actor_type']:<12} "
+            f"{event['action']:<24} {event['summary']}"
+        )
+
+
+@pm_session_app.command("start")
+def pm_session_start(
+    project: str = typer.Argument(..., help="Project id or name."),
+    title: str = typer.Argument(..., help="Current bounded PM slice."),
+    task_id: str = typer.Option(None, "--task", help="Continue an existing work item."),
+    owner: str = typer.Option("codex", "--owner", help="Accountable PM or agent."),
+    acceptance: str = typer.Option(None, "--acceptance", help="Observable done-when check."),
+    next_action: str = typer.Option(None, "--next-action", help="Current explicit next action."),
+    thread_id: str = typer.Option(None, "--thread", help="Linked Codex task/thread id."),
+):
+    """Start or continue a PM session and persist its attribution."""
+    conn = _conn()
+    try:
+        project_row = store.get_project(conn, project)
+        tracked_task, session_id = store.start_pm_session(
+            conn,
+            project_id=project_row["id"],
+            title=title,
+            task_id=task_id,
+            owner=owner,
+            acceptance=acceptance,
+            next_action=next_action,
+            codex_thread_id=thread_id,
+            source="cli-pm",
+        )
+    except (store.NotFound, ValueError) as exc:
+        _err(str(exc))
+    typer.secho(f"PM session {session_id} started", fg=typer.colors.GREEN)
+    typer.echo(f"task {tracked_task}")
+
+
+@pm_session_app.command("event")
+def pm_session_event(
+    task_id: str = typer.Argument(..., help="Tracked PM work item."),
+    action: str = typer.Argument(..., help="Stable event action, e.g. delegation.started."),
+    summary: str = typer.Argument(..., help="Human-readable attribution summary."),
+    actor: str = typer.Option("codex", "--actor"),
+    actor_type: str = typer.Option("agent", "--actor-type"),
+    model: str = typer.Option(None, "--model"),
+    source_ref: str = typer.Option(None, "--ref", help="Run, commit, PR, or artifact id."),
+):
+    """Append an attributed event to the current PM session."""
+    conn = _conn()
+    try:
+        task = store.get_task(conn, task_id)
+        event_id = store.create_activity_event(
+            conn,
+            project_id=task["project_id"],
+            task_id=task_id,
+            actor_type=actor_type,
+            actor_name=actor,
+            model=model,
+            action=action,
+            summary=summary,
+            source="cli-pm",
+            source_ref=source_ref,
+            session_id=task["pm_session_id"],
+        )
+    except store.NotFound as exc:
+        _err(str(exc))
+    typer.secho(f"recorded event {event_id}", fg=typer.colors.GREEN)
+
+
+@pm_session_app.command("close")
+def pm_session_close(
+    task_id: str = typer.Argument(..., help="Tracked PM work item."),
+    summary: str = typer.Argument(..., help="Accepted result, blocker, or continuation state."),
+    status: str = typer.Option("done", "--status", help="done | review | blocked | in_progress."),
+    owner: str = typer.Option("codex", "--owner"),
+    next_action: str = typer.Option(None, "--next-action", help="Exactly one recommended continuation."),
+):
+    """Close a PM session with its outcome and next action."""
+    conn = _conn()
+    try:
+        session_id = store.close_pm_session(
+            conn,
+            task_id,
+            status=status,
+            summary=summary,
+            owner=owner,
+            next_action=next_action,
+            source="cli-pm",
+        )
+    except (store.NotFound, ValueError) as exc:
+        _err(str(exc))
+    typer.secho(f"PM session {session_id} closed as {status}", fg=typer.colors.GREEN)
 
 
 @project_app.command("list")
@@ -944,6 +1118,10 @@ def project_update(
     privacy: str = typer.Option(None, "--privacy", help="public | internal | restricted."),
     goal: str = typer.Option(None, "--goal"),
     test_command: str = typer.Option(None, "--test"),
+    remote_url: str = typer.Option(None, "--remote-url"),
+    github_owner: str = typer.Option(None, "--github-owner"),
+    github_repo: str = typer.Option(None, "--github-repo"),
+    codex_project_id: str = typer.Option(None, "--codex-project"),
 ):
     """Update portfolio metadata for a registered project."""
     conn = _conn()
@@ -960,6 +1138,10 @@ def project_update(
             "privacy": privacy,
             "current_goal": goal,
             "test_command": test_command,
+            "remote_url": remote_url,
+            "github_owner": github_owner,
+            "github_repo": github_repo,
+            "codex_project_id": codex_project_id,
         }.items()
         if value is not None
     }
@@ -982,6 +1164,15 @@ def task_update(
     priority: int = typer.Option(None, "--priority", min=1, max=5),
     assignee: str = typer.Option(None, "--assignee"),
     due_at: str = typer.Option(None, "--due"),
+    parent_id: str = typer.Option(None, "--parent"),
+    milestone: str = typer.Option(None, "--milestone"),
+    progress: int = typer.Option(None, "--progress", min=0, max=100),
+    blocked_reason: str = typer.Option(None, "--blocked-reason"),
+    next_action: str = typer.Option(None, "--next-action"),
+    thread_id: str = typer.Option(None, "--thread"),
+    github_issue_url: str = typer.Option(None, "--github-issue"),
+    actor: str = typer.Option("owner", "--actor"),
+    actor_type: str = typer.Option("human", "--actor-type", help="human | agent | system"),
 ):
     """Update a task's routing controls or lifecycle state."""
     conn = _conn()
@@ -1001,11 +1192,20 @@ def task_update(
             "priority": priority,
             "assignee": assignee,
             "due_at": due_at,
+            "parent_id": parent_id,
+            "milestone": milestone,
+            "progress": progress,
+            "blocked_reason": blocked_reason,
+            "next_action": next_action,
+            "codex_thread_id": thread_id,
+            "github_issue_url": github_issue_url,
         }.items()
         if value is not None
     }
     try:
-        store.update_task(conn, task["id"], **fields)
+        store.update_task(
+            conn, task["id"], actor_type=actor_type, actor_name=actor, source="cli", **fields
+        )
     except ValueError as exc:
         _err(str(exc))
     typer.secho(f"updated task {task['id']}", fg=typer.colors.GREEN)

@@ -128,14 +128,27 @@ def portfolio_focus(
         for row in store.list_projects(conn)
         if row["status"] == "active" and (not project_id or row["id"] == project_id)
     }
-    tasks = [
+    all_tasks = [
         row for row in store.list_all_tasks(conn)
         if row["project_id"] in projects
     ]
+    tasks = all_tasks
     suggestions = [
         row for row in store.list_suggestions(conn, status="proposed")
         if row["project_id"] in projects
     ]
+    status_by_task = {
+        row["id"]: row["status"]
+        for row in store.list_all_tasks(conn, include_done=True)
+        if row["project_id"] in projects
+    }
+    incomplete_dependencies: set[str] = set()
+    for dependency in store.list_task_dependencies(conn):
+        if dependency["task_id"] not in status_by_task:
+            continue
+        upstream_status = status_by_task.get(dependency["depends_on_task_id"])
+        if upstream_status not in {"done", "abandoned"}:
+            incomplete_dependencies.add(dependency["task_id"])
     decisions = [
         row for row in tasks
         if row["status"] in {"review", "blocked"}
@@ -146,7 +159,10 @@ def portfolio_focus(
         if row["status"] in {"running", "in_progress", "assigned"}
         and str(row["assignee"] or "").lower() not in {"owner", "perplexity"}
     ]
-    ready = [row for row in tasks if row["status"] == "open"]
+    ready = [
+        row for row in tasks
+        if row["status"] == "open" and row["id"] not in incomplete_dependencies
+    ]
     if decisions:
         row = decisions[0]
         focus = {"kind": "decision", "id": row["id"], "project_id": row["project_id"]}

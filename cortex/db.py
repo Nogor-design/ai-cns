@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS projects (
     -- JSON array of worker names permitted to see this repository. NULL means
     -- "not configured yet"; the policy layer supplies a privacy-based default.
     allowed_workers TEXT,
+    remote_url      TEXT,
+    github_owner    TEXT,
+    github_repo     TEXT,
+    codex_project_id TEXT,
     updated_at    TEXT NOT NULL
 );
 
@@ -65,6 +69,21 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority       INTEGER NOT NULL DEFAULT 3,       -- 1 (highest) .. 5 (lowest)
     assignee       TEXT,                            -- explicit worker or human owner
     due_at         TEXT,                            -- optional ISO date/datetime
+    parent_id      TEXT REFERENCES tasks(id),
+    milestone      TEXT,
+    start_at       TEXT,
+    target_at      TEXT,
+    completed_at   TEXT,
+    progress       INTEGER NOT NULL DEFAULT 0,
+    blocked_reason TEXT,
+    next_action    TEXT,
+    github_issue_id TEXT,
+    github_issue_number INTEGER,
+    github_issue_url TEXT,
+    github_project_item_id TEXT,
+    codex_thread_id TEXT,
+    pm_session_id  TEXT,
+    sync_state     TEXT,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
@@ -100,6 +119,30 @@ CREATE TABLE IF NOT EXISTS decisions (
     decision    TEXT NOT NULL,
     rationale   TEXT,
     source      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_dependencies (
+    task_id            TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    depends_on_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    type               TEXT NOT NULL DEFAULT 'blocks',
+    created_at         TEXT NOT NULL,
+    PRIMARY KEY (task_id, depends_on_task_id)
+);
+
+CREATE TABLE IF NOT EXISTS activity_events (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    task_id     TEXT REFERENCES tasks(id),
+    actor_type  TEXT NOT NULL DEFAULT 'agent',
+    actor_name  TEXT,
+    model       TEXT,
+    action      TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'cortex',
+    source_ref  TEXT,
+    session_id  TEXT,
+    occurred_at TEXT NOT NULL,
+    evidence_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS suggestions (
@@ -170,6 +213,10 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id);
+CREATE INDEX IF NOT EXISTS idx_dependencies_task ON task_dependencies(task_id);
+CREATE INDEX IF NOT EXISTS idx_dependencies_upstream ON task_dependencies(depends_on_task_id);
+CREATE INDEX IF NOT EXISTS idx_activity_project_time ON activity_events(project_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_task_time ON activity_events(task_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_suggestions_project ON suggestions(project_id);
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
 
@@ -200,6 +247,10 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "privacy": "TEXT NOT NULL DEFAULT 'internal'",
         "state_mode": "TEXT NOT NULL DEFAULT 'tracked'",
         "allowed_workers": "TEXT",
+        "remote_url": "TEXT",
+        "github_owner": "TEXT",
+        "github_repo": "TEXT",
+        "codex_project_id": "TEXT",
     },
     "tasks": {
         "risk": "TEXT NOT NULL DEFAULT 'auto'",
@@ -212,6 +263,21 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "due_at": "TEXT",
         "requested_model": "TEXT",
         "effort": "TEXT",
+        "parent_id": "TEXT REFERENCES tasks(id)",
+        "milestone": "TEXT",
+        "start_at": "TEXT",
+        "target_at": "TEXT",
+        "completed_at": "TEXT",
+        "progress": "INTEGER NOT NULL DEFAULT 0",
+        "blocked_reason": "TEXT",
+        "next_action": "TEXT",
+        "github_issue_id": "TEXT",
+        "github_issue_number": "INTEGER",
+        "github_issue_url": "TEXT",
+        "github_project_item_id": "TEXT",
+        "codex_thread_id": "TEXT",
+        "pm_session_id": "TEXT",
+        "sync_state": "TEXT",
     },
     "runs": {
         "workspace_path": "TEXT",
@@ -222,6 +288,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     "suggestions": {
         "effort": "TEXT",
+    },
+    "activity_events": {
+        "session_id": "TEXT",
     },
 }
 

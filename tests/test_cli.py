@@ -126,3 +126,30 @@ def test_history_empty(git_repo):
     r = _run("history", "empty")
     assert r.exit_code == 0
     assert "no runs recorded" in r.output
+
+
+def test_pm_session_cli_records_attributed_activity(git_repo):
+    assert _run("init", str(git_repo), "--name", "PM Flow").exit_code == 0
+    started = _run(
+        "pm", "start", "pm-flow", "Implement durable records",
+        "--thread", "codex-thread-1", "--next-action", "Run tests",
+    )
+    assert started.exit_code == 0, started.output
+    task_id = started.output.strip().splitlines()[-1].split()[-1]
+    assert "PM session" in started.output
+
+    event = _run(
+        "pm", "event", task_id, "delegation.completed", "Gemini reviewed schema",
+        "--actor", "gemini", "--model", "gemini-2.5-pro",
+    )
+    assert event.exit_code == 0, event.output
+    closed = _run(
+        "pm", "close", task_id, "Durable records accepted", "--status", "done",
+        "--next-action", "Start Codex app integration",
+    )
+    assert closed.exit_code == 0, closed.output
+
+    activity = _run("activity", "list", "--task", task_id, "--json")
+    assert activity.exit_code == 0, activity.output
+    assert "delegation.completed" in activity.output
+    assert "pm.session_closed" in activity.output

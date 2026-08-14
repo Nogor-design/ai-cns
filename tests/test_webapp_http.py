@@ -154,3 +154,33 @@ def test_project_allowlist_can_be_updated_over_http(
     )
     assert project["allowed_workers"] == ["claude", "ollama"]
     assert project["allowlist_configured"] is True
+
+
+def test_activity_endpoint_filters_by_project_task_and_session(
+    dashboard_server, isolated_db, tmp_path
+):
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Activity Demo", repo_path=str(tmp_path), stack="Python"
+        )
+        task_id = store.create_task(conn, project_id=project_id, title="Trace me")
+        store.create_activity_event(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            actor_type="agent",
+            actor_name="gemini",
+            action="review.completed",
+            summary="Review complete",
+            session_id="session-one",
+            evidence={"accepted": True},
+        )
+
+    status, payload = request_json(
+        dashboard_server,
+        f"/api/activity?project={project_id}&task={task_id}&session=session-one",
+    )
+    assert status == 200
+    assert len(payload["activity"]) == 1
+    assert payload["activity"][0]["actor_name"] == "gemini"
+    assert payload["activity"][0]["evidence"] == {"accepted": True}

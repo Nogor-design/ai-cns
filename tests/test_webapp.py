@@ -106,6 +106,28 @@ def test_portfolio_payload_exposes_expert_team_and_execution_controls(conn, proj
     assert task["execution_worker"] == "grok"
     assert task["execution_model"] == "grok-4.5"
     assert task["execution_effort"] == "medium"
-    assert grok["state"] in {"queued", "missing", "needs_auth"}
+    # The first dashboard read deliberately does not block on CLI auth probes.
+    # Until Grok's background probe resolves, "checking" is the truthful state;
+    # a probe timeout is likewise reported as "unavailable" rather than hidden.
+    assert grok["state"] in {
+        "queued", "checking", "missing", "needs_auth", "unavailable",
+    }
     assert "usage" in payload
     assert "model_performance" in payload
+
+
+def test_portfolio_payload_keeps_work_blocker_separate_and_exposes_activity(conn, project):
+    task_id = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="Track a real blocker",
+        blocked_reason="Waiting on owner approval",
+        actor_type="agent",
+        actor_name="codex",
+    )
+    payload = webapp.portfolio_payload(conn)
+    task = next(row for row in payload["tasks"] if row["id"] == task_id)
+    assert task["blocked_reason"] == "Waiting on owner approval"
+    assert "policy_blocked_reason" in task
+    assert payload["activity"][0]["action"] == "task.created"
+    assert payload["activity"][0]["actor_name"] == "codex"

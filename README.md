@@ -7,6 +7,9 @@ and explainable task routing in one SQLite database.
 
 See `AI-CNS-V1-MVP-Spec.md` for the original design.
 
+For PM use, start with `PM-OPERATING-MODEL.md` and
+`PORTFOLIO-CONTROL-PLANE-RECOMMENDATION.md`.
+
 ## What works now
 
 1. **AI project-manager dashboard and expert team** - one Continue action,

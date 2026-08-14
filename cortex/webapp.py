@@ -30,15 +30,31 @@ ACTIVE_TASK_STATUSES = {"open", "assigned", "in_progress", "running", "review", 
 TASK_MUTABLE_FIELDS = {
     "title", "type", "status", "brief", "risk", "complexity", "acceptance",
     "allowed_paths", "budget", "priority", "assignee", "requested_model", "effort", "due_at",
+    "parent_id", "milestone", "start_at", "target_at", "progress",
+    "blocked_reason", "next_action", "github_issue_id", "github_issue_number",
+    "github_issue_url", "github_project_item_id", "codex_thread_id", "sync_state",
 }
 PROJECT_MUTABLE_FIELDS = {
     "status", "program", "priority", "privacy", "state_mode", "current_goal",
-    "test_command", "allowed_workers",
+    "test_command", "allowed_workers", "remote_url", "github_owner", "github_repo",
+    "codex_project_id",
 }
 
 
 def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
+
+
+def _activity_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = _row_dict(row)
+    if item.get("evidence_json"):
+        try:
+            item["evidence"] = json.loads(item["evidence_json"])
+        except (TypeError, json.JSONDecodeError):
+            item["evidence"] = item["evidence_json"]
+    else:
+        item["evidence"] = None
+    return item
 
 
 def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -83,6 +99,16 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         run_payloads.append(item)
         latest_run_by_task.setdefault(run["task_id"], item)
 
+    dependency_rows = store.list_task_dependencies(conn)
+    dependencies_by_task: dict[str, list[dict[str, Any]]] = {}
+    for dependency in dependency_rows:
+        item = _row_dict(dependency)
+        dependencies_by_task.setdefault(dependency["task_id"], []).append(item)
+
+    activity_payloads = [
+        _activity_dict(event) for event in store.list_activity_events(conn, limit=100)
+    ]
+
     task_payloads: list[dict[str, Any]] = []
     project_task_index: dict[str, list[dict[str, Any]]] = {
         row["id"]: [] for row in project_rows
@@ -106,8 +132,9 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         item["execution_model"] = task["requested_model"] or effective.model
         item["execution_effort"] = task["effort"] or effective.effort
         item["policy_note"] = effective.policy_note
-        item["blocked_reason"] = effective.blocked_reason
+        item["policy_blocked_reason"] = effective.blocked_reason
         item["latest_run"] = latest_run_by_task.get(task["id"])
+        item["dependencies"] = dependencies_by_task.get(task["id"], [])
         task_payloads.append(item)
         project_task_index[task["project_id"]].append(item)
         if task["assignee"]:
@@ -132,6 +159,10 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             stack=project["stack"],
             test_command=project["test_command"],
             updated_at=project["updated_at"],
+            remote_url=project["remote_url"],
+            github_owner=project["github_owner"],
+            github_repo=project["github_repo"],
+            codex_project_id=project["codex_project_id"],
             allowed_workers=list(policy.allowed_workers(project)),
             allowlist_configured=policy.is_configured(project),
         )
@@ -257,6 +288,8 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "tasks": task_payloads,
         "suggestions": suggestion_payloads,
         "runs": run_payloads,
+        "activity": activity_payloads,
+        "dependencies": [_row_dict(row) for row in dependency_rows],
         "workers": worker_payloads,
         "team": expert_payloads,
         "usage": usage,
@@ -351,6 +384,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/portfolio":
             with db.connect(self.server.database_path) as conn:
                 self._json(HTTPStatus.OK, portfolio_payload(conn))
+            return
+        if path == "/api/activity":
+            params = parse_qs(urlparse(self.path).query)
+            project = params.get("project", [None])[0]
+            task_id = params.get("task", [None])[0]
+            session_id = params.get("session", [None])[0]
+            try:
+                limit = max(1, min(500, int(params.get("limit", ["100"])[0])))
+            except ValueError:
+                limit = 100
+            with db.connect(self.server.database_path) as conn:
+                project_id = None
+                if project:
+                    try:
+                        project_id = store.get_project(conn, project)["id"]
+                    except store.NotFound as exc:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                        return
+                events = store.list_activity_events(
+                    conn,
+                    project_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    limit=limit,
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    {"activity": [_activity_dict(event) for event in events]},
+                )
             return
         if path == "/api/health":
             self._json(HTTPStatus.OK, {"ok": True, "database": str(self.server.database_path)})

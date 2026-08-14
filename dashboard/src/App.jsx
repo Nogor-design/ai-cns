@@ -5,6 +5,7 @@ import {
   LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
   Search, Sparkles, UsersRound, UserRound, WandSparkles, X,
 } from 'lucide-react'
+import { filterAndGroupTimeline } from './timeline.js'
 
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
@@ -15,6 +16,7 @@ const workers = {
 
 const navItems = [
   ['overview', 'Today', LayoutDashboard], ['projects', 'All projects', FolderGit2],
+  ['timeline', 'Timeline', Clock3],
   ['paused', 'Paused / external', PauseCircle],
 ]
 const statuses = ['open', 'assigned', 'in_progress', 'running', 'review', 'blocked', 'done']
@@ -260,6 +262,84 @@ function RunActivity({ runs, onView }) {
   </section>
 }
 
+function timelineStatus(item) {
+  if (item.kind === 'activity') {
+    if (item.action?.includes('blocked') || item.action === 'run.failed') return 'failed'
+    if (item.action?.includes('closed') || item.action?.includes('completed')) return 'completed'
+    if (item.action?.includes('started')) return 'running'
+    if (item.action?.includes('status_changed')) return 'review'
+    return 'queued'
+  }
+  if (item.state === 'completed' && item.task_status === 'review') return 'review'
+  return item.state
+}
+
+function timelineOutcome(item) {
+  if (item.kind === 'activity') return item.summary
+  if (item.state === 'running') return 'Execution is still in progress.'
+  if (item.state === 'failed') return `Execution failed${item.exit_code == null ? '' : ` with exit code ${item.exit_code}`}.`
+  if (item.outcome && item.outcome !== 'unknown') return `Outcome: ${pretty(item.outcome)}.`
+  if (item.tests_passed === 1) return 'Tests passed; evidence was captured.'
+  if (item.tests_passed === 0) return 'Tests failed; review the captured evidence.'
+  if (item.task_status === 'review') return 'Worker output is waiting for acceptance review.'
+  return 'Execution completed and evidence was captured.'
+}
+
+function TimelineEvent({ item, linkedRun, onView }) {
+  const occurred = new Date(item.timestamp)
+  const actor = item.kind === 'activity' ? (item.actor_name || item.actor_type || 'cortex') : executionWorker(item)
+  const taskTitle = item.task_title || (item.kind === 'activity' ? 'Portfolio activity' : 'Untitled work item')
+  const content = <>
+    <span className="timeline-track" aria-hidden="true"><i className={`run-state ${timelineStatus(item)}`} /></span>
+    <span className="timeline-time">
+      <strong>{occurred.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</strong>
+      <small>{item.kind === 'run' && item.ended_at ? `to ${new Date(item.ended_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : pretty(item.action || 'recorded')}</small>
+    </span>
+    <span className="timeline-card">
+      <span className="timeline-card-heading"><span><small>{item.project_name}</small><strong>{taskTitle}</strong></span><StatusPill value={timelineStatus(item)} /></span>
+      <span className="timeline-outcome">{timelineOutcome(item)}</span>
+      <span className="timeline-meta"><WorkerBadge name={actor} /><span>{item.kind === 'run' ? durationLabel(item) : pretty(item.actor_type || 'system')}</span><code>{item.session_id || item.id}</code>{linkedRun && <em>View evidence <ChevronRight size={13} /></em>}</span>
+    </span>
+  </>
+  if (linkedRun) return <button type="button" className="timeline-event" onClick={() => onView(linkedRun)}>{content}</button>
+  return <article className="timeline-event timeline-event-static">{content}</article>
+}
+
+function EvidenceTimeline({ runs, activity, project, onView, onClearProject }) {
+  const groups = useMemo(
+    () => filterAndGroupTimeline(runs, activity, project?.project_id || null),
+    [runs, activity, project?.project_id],
+  )
+  const runMap = useMemo(() => Object.fromEntries(runs.map(run => [run.id, run])), [runs])
+  const visibleCount = groups.reduce((count, group) => count + group.events.length, 0)
+
+  return <section className="timeline-section" aria-labelledby="evidence-timeline-title">
+    <div className="timeline-heading">
+      <div>
+        <span className="eyebrow">Who did what</span>
+        <h1 id="evidence-timeline-title">{project ? `${project.name} evidence timeline` : 'Portfolio evidence timeline'}</h1>
+        <p>{project ? `Attributed work and execution history linked to ${project.name}.` : 'A chronological record of PM sessions, decisions, assignments, agent work, and review evidence across every project.'}</p>
+      </div>
+      <div className="timeline-heading-actions">
+        <span><strong>{visibleCount}</strong> recorded event{visibleCount === 1 ? '' : 's'}</span>
+        {project && <button type="button" onClick={onClearProject}>View all projects</button>}
+      </div>
+    </div>
+    <div className="timeline-container">
+      {groups.map(group => <section className="timeline-day" key={group.key} aria-labelledby={`timeline-day-${group.key}`}>
+        <div className="timeline-day-heading">
+          <h2 id={`timeline-day-${group.key}`}>{group.label}</h2>
+          <span>{group.events.length} event{group.events.length === 1 ? '' : 's'}</span>
+        </div>
+        <div className="timeline-events">
+          {group.events.map(item => <TimelineEvent key={`${item.kind}-${item.id}`} item={item} linkedRun={runMap[item.run_id]} onView={onView} />)}
+        </div>
+      </section>)}
+      {!groups.length && <div className="timeline-empty"><Clock3 size={20} /><strong>No activity history found.</strong><span>{project ? `Cortex has not recorded work for ${project.name}.` : 'PM sessions, decisions, assignments, and agent runs will appear here automatically.'}</span></div>}
+    </div>
+  </section>
+}
+
 function RunModal({ run, onClose }) {
   const live = useRunOutput(run?.id, run?.state === 'running')
   const bodyRef = useRef(null)
@@ -319,12 +399,12 @@ function WorkerAllowlist({ project, onChange }) {
   </section>
 }
 
-function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist }) {
+function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist, onTimeline }) {
   if (!project) return null
   return <aside className="drawer"><div className="drawer-head"><div><span className="project-monogram large" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span><span><small>{project.program}</small><h2>{project.name}</h2></span></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <div className="drawer-primary"><button onClick={() => onPlan(project.project_id, 'codex')}><Sparkles size={16} />Ask Codex to plan next</button><button onClick={() => onPlan(project.project_id, 'ollama')}><Cpu size={16} />Use local planner</button></div>
     <section><label>Current goal</label><p>{project.current_goal || 'No goal has been set.'}</p></section>
-    <section className="drawer-evidence"><label>Repository evidence</label><div><GitBranch size={14} />{project.branch || 'Not under Git'}<span>{gitLabel(project)}</span></div>{project.warnings?.[0] && <small><AlertTriangle size={13} />{project.warnings[0]}</small>}</section>
+    <section className="drawer-evidence"><label>Repository evidence</label><div><GitBranch size={14} />{project.branch || 'Not under Git'}<span>{gitLabel(project)}</span></div>{project.warnings?.[0] && <small><AlertTriangle size={13} />{project.warnings[0]}</small>}<button type="button" className="drawer-timeline-action" onClick={() => onTimeline(project.project_id)}><Clock3 size={14} />View project timeline</button></section>
     <WorkerAllowlist project={project} onChange={onAllowlist} />
     <section><div className="drawer-section-head"><label>Active work ({project.tasks.length})</label><button onClick={() => onManual(project.project_id)}><Plus size={13} />Manual</button></div><div className="drawer-task-list">{project.tasks.map(task => <div className="drawer-task" key={task.id}><div><strong>{task.title}</strong><span><StatusPill value={task.status} /><WorkerBadge name={task.execution_worker} /></span><small>{task.execution_model || 'default model'} · {task.execution_effort || 'auto'} effort</small></div><div>{task.status === 'assigned' && !['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()) && <button onClick={() => onStart(task)}><CirclePlay size={14} />Start</button>}<select aria-label="Model" value={task.requested_model || ''} onChange={event => onTaskUpdate(task.id, { requested_model: event.target.value || null })}><option value="">Auto model</option><option value="grok-4.5">grok-4.5</option><option value="sonnet">Claude Sonnet</option><option value="opus">Claude Opus</option></select><select aria-label="Effort" value={task.effort || ''} onChange={event => onTaskUpdate(task.id, { effort: event.target.value || null })}><option value="">Auto effort</option>{['low', 'medium', 'high', 'xhigh'].map(value => <option key={value}>{value}</option>)}</select><select aria-label="Status" value={task.status} onChange={event => onTaskUpdate(task.id, { status: event.target.value })}>{statuses.map(status => <option key={status} value={status}>{pretty(status)}</option>)}</select></div></div>)}{!project.tasks.length && <div className="lane-empty">No active tasks.</div>}</div></section>
     <div className="drawer-path"><FolderGit2 size={14} /><span title={project.repo_path}>{project.repo_path}</span></div>
@@ -346,6 +426,7 @@ export default function App() {
   const [error, setError] = useState(''), [toast, setToast] = useState('')
   const [manualProject, setManualProject] = useState(undefined)
   const [selectedRun, setSelectedRun] = useState(null)
+  const [timelineProjectId, setTimelineProjectId] = useState(null)
   const pollRef = useRef(null)
 
   async function load(silent = false) { if (!silent) setError(''); try { const [portfolio, jobPayload] = await Promise.all([request('/api/portfolio'), request('/api/jobs')]); setData({ ...portfolio, jobs: jobPayload.jobs }) } catch (err) { setError(err.message) } }
@@ -367,6 +448,7 @@ export default function App() {
   const visibleRuns = (data?.runs || []).filter(run => visibleIds.has(run.project_id))
   const serverRunningJobs = (data?.jobs || []).filter(item => item.status === 'running')
   const selected = projectMap[selectedId] || null
+  const timelineProject = projectMap[timelineProjectId] || null
 
   useEffect(() => {
     if (!serverRunningJobs.length || job) return undefined
@@ -441,28 +523,41 @@ export default function App() {
   async function keepTeamWorking() { try { const payload = await request('/api/team/keep-working', { method: 'POST', body: JSON.stringify({ limit: 3 }) }); if (!payload.job_ids.length) { setToast('No safe approved assignments are waiting; ask the PM to plan a project'); await load(true); return } watchJob(payload.job_ids[0], 'Starting team') } catch (err) { setError(err.message) } }
   async function refreshGit() { try { const payload = await request('/api/git/refresh', { method: 'POST', body: JSON.stringify({ fetch: true }) }); watchJob(payload.job_id, 'Checking GitHub') } catch (err) { setError(err.message) } }
 
+  function changeNav(next) {
+    if (next === 'timeline') setTimelineProjectId(null)
+    setActiveNav(next)
+  }
+
+  function openProjectTimeline(projectId) {
+    setTimelineProjectId(projectId)
+    setSelectedId(null)
+    setActiveNav('timeline')
+  }
+
   if (!data && !error) return <div className="app-loading"><LoaderCircle className="spin" size={22} />Loading your portfolio…</div>
   if (!data) return <div className="app-loading error"><CircleAlert size={24} /><strong>Dashboard unavailable</strong><span>{error}</span><button onClick={() => load()}><RotateCcw size={15} />Retry</button></div>
 
   return <div className="app-shell">
-    <Sidebar data={data} active={activeNav} onChange={setActiveNav} selectedId={selectedId} onSelect={setSelectedId} />
+    <Sidebar data={data} active={activeNav} onChange={changeNav} selectedId={selectedId} onSelect={setSelectedId} />
     <div className={`content-shell ${selected ? 'drawer-open' : ''}`}><main>
       <header className="topbar"><div><span className="eyebrow">Local AI control plane</span><strong>Cortex Portfolio</strong></div><div><label className="search"><Search size={15} /><input aria-label="Search projects" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search projects" /></label><button className="icon-button" onClick={() => load()} aria-label="Refresh"><RefreshCw size={16} /></button></div></header>
       {error && <div className="error-banner"><CircleAlert size={15} /><span>{error}</span><button onClick={() => setError('')}><X size={14} /></button></div>}
       {(job || serverRunningJobs.length > 0) && <div className="job-banner"><LoaderCircle className="spin" size={16} /><span><strong>{job?.label || pretty(serverRunningJobs[0]?.kind || 'Worker')}</strong> is active. Execution activity below shows the worker and elapsed time.</span></div>}
       <div className="main-content">
-        <Hero planner={planner} setPlanner={setPlanner} onContinue={continueWork} busy={Boolean(job) || serverRunningJobs.length > 0} onManual={() => setManualProject(null)} />
-        <div className="summary-line"><span><strong>{data.summary.needs_decision}</strong> need you</span><span><strong>{data.summary.working}</strong> assigned / working</span><span><strong>{data.summary.recommendations}</strong> ready to approve</span><span><strong>{data.summary.active_projects}</strong> active projects</span><em>Plans are cached to conserve tokens</em></div>
-        <TeamPanel team={data.team || []} onKeepWorking={keepTeamWorking} busy={Boolean(job) || serverRunningJobs.length > 0} />
-        <DecisionLane tasks={decisions} projects={projectMap} onSelect={setSelectedId} onViewRun={setSelectedRun} />
-        <WorkingLane tasks={working} projects={projectMap} onStart={startTask} onSelect={setSelectedId} />
-        <RunActivity runs={visibleRuns} onView={setSelectedRun} />
-        <RecommendationLane suggestions={suggestions} projects={projectMap} selectedProject={selected} onApprove={approveSuggestion} onDismiss={dismissSuggestion} onPlan={() => planProject(selectedId)} planning={job?.label === 'Planning' || serverRunningJobs.some(item => item.kind === 'plan')} />
-        <HealthPanel data={data} onGitRefresh={refreshGit} busy={job?.label === 'Checking GitHub' || serverRunningJobs.some(item => item.kind === 'git')} />
-        <ProjectsTable projects={filteredProjects} selectedId={selectedId} onSelect={setSelectedId} onPlan={id => planProject(id)} />
+        {activeNav === 'timeline' ? <EvidenceTimeline runs={data.runs || []} activity={data.activity || []} project={timelineProject} onView={setSelectedRun} onClearProject={() => setTimelineProjectId(null)} /> : <>
+          <Hero planner={planner} setPlanner={setPlanner} onContinue={continueWork} busy={Boolean(job) || serverRunningJobs.length > 0} onManual={() => setManualProject(null)} />
+          <div className="summary-line"><span><strong>{data.summary.needs_decision}</strong> need you</span><span><strong>{data.summary.working}</strong> assigned / working</span><span><strong>{data.summary.recommendations}</strong> ready to approve</span><span><strong>{data.summary.active_projects}</strong> active projects</span><em>Plans are cached to conserve tokens</em></div>
+          <TeamPanel team={data.team || []} onKeepWorking={keepTeamWorking} busy={Boolean(job) || serverRunningJobs.length > 0} />
+          <DecisionLane tasks={decisions} projects={projectMap} onSelect={setSelectedId} onViewRun={setSelectedRun} />
+          <WorkingLane tasks={working} projects={projectMap} onStart={startTask} onSelect={setSelectedId} />
+          <RunActivity runs={visibleRuns} onView={setSelectedRun} />
+          <RecommendationLane suggestions={suggestions} projects={projectMap} selectedProject={selected} onApprove={approveSuggestion} onDismiss={dismissSuggestion} onPlan={() => planProject(selectedId)} planning={job?.label === 'Planning' || serverRunningJobs.some(item => item.kind === 'plan')} />
+          <HealthPanel data={data} onGitRefresh={refreshGit} busy={job?.label === 'Checking GitHub' || serverRunningJobs.some(item => item.kind === 'git')} />
+          <ProjectsTable projects={filteredProjects} selectedId={selectedId} onSelect={setSelectedId} onPlan={id => planProject(id)} />
+        </>}
         <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges or external actions</span></footer>
       </div>
-    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} /></div>
+    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} onTimeline={openProjectTimeline} /></div>
     {manualProject !== undefined && <ManualTaskModal projects={data.projects} initialProject={manualProject || ''} onClose={() => setManualProject(undefined)} onCreated={async () => { setManualProject(undefined); setToast('Manual task added'); await load(true) }} />}
     <RunModal run={selectedRun} onClose={() => setSelectedRun(null)} />
     {toast && <div className="toast"><Check size={15} />{toast}</div>}
