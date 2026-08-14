@@ -314,6 +314,8 @@ footer span:last-child { margin-left: auto; }
 .drawer-task > div:first-child > small { color: #78909e; font-size: 8px; }
 .drawer-task > div:last-child { margin-top: 8px; display: flex; justify-content: flex-end; gap: 6px; }
 .drawer-task button { height: 29px; display: flex; align-items: center; gap: 4px; border: 1px solid #337468; border-radius: 6px; background: #155b53; color: white; font-size: 9px; }
+.drawer-task .task-codex-action { width: 100%; margin-top: 9px; justify-content: center; border-color: #315467; background: #153447; color: #c5e9e3; font-weight: 700; }
+.drawer-task .task-codex-action:hover { border-color: #4fc8b4; color: white; }
 .drawer select { height: 29px; max-width: 116px; color: #a7bbc5; background: #0c1f2c; border: 1px solid #344b59; border-radius: 6px; font-size: 9px; }
 .drawer .lane-empty { color: #79909c; }
 .drawer-path { margin-top: 12px; display: flex; align-items: center; gap: 7px; color: #647e8c; font-size: 9px; }
@@ -321,6 +323,19 @@ footer span:last-child { margin-left: auto; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(5,17,25,.64); backdrop-filter: blur(3px); }
 .manual-modal { width: 440px; padding: 22px; border-radius: 12px; background: #fbfaf7; box-shadow: 0 30px 70px rgba(6,20,29,.35); display: grid; gap: 14px; }
+.codex-launch-modal { width: min(760px, calc(100vw - 80px)); max-height: calc(100vh - 70px); overflow: auto; padding: 22px; border-radius: 12px; background: #fbfaf7; box-shadow: 0 30px 70px rgba(6,20,29,.35); display: grid; gap: 14px; }
+.codex-launch-loading { min-height: 190px; display: flex; align-items: center; justify-content: center; gap: 8px; color: #617078; font-size: 11px; }
+.codex-capability { padding: 12px 14px; border: 1px solid; border-radius: 9px; display: grid; gap: 6px; }
+.codex-capability.ready { border-color: #9ecfc6; background: #eaf6f3; color: #276c61; }
+.codex-capability.fallback { border-color: #dfc899; background: #fbf4e5; color: #876526; }
+.codex-capability > span { display: flex; align-items: center; gap: 7px; }
+.codex-capability small { color: #66767d; font-size: 10px; }
+.codex-capability code { width: fit-content; padding: 3px 6px; border-radius: 4px; background: rgba(255,255,255,.62); color: inherit; font-size: 9px; }
+.codex-prompt-label { display: grid; gap: 6px; color: #65727a; font-size: 10px; font-weight: 700; }
+.codex-prompt-label textarea { width: 100%; resize: vertical; border: 1px solid #cfd7d4; border-radius: 8px; padding: 13px; background: #f4f6f4; color: #2d3b43; outline: none; font: 10px/1.55 Consolas, monospace; }
+.codex-prompt-label textarea:focus { border-color: #64aa9f; box-shadow: 0 0 0 3px rgba(39,140,125,.1); }
+.codex-launch-note { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 7px; background: #eef2f1; color: #617078; font-size: 10px; line-height: 1.45; }
+.codex-launch-note svg { flex: 0 0 auto; color: #a57931; }
 .run-modal { width: min(820px, calc(100vw - 80px)); max-height: calc(100vh - 70px); overflow: auto; padding: 22px; border-radius: 12px; background: #fbfaf7; box-shadow: 0 30px 70px rgba(6,20,29,.35); }
 .run-facts { margin: 15px 0 10px; display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); border-radius: 9px; background: #fff; }
 .run-facts > span { min-height: 61px; padding: 10px 12px; display: grid; align-content: center; gap: 6px; border-right: 1px solid var(--line); }
@@ -417,7 +432,7 @@ footer span:last-child { margin-left: auto; }
   .drawer { width: 100%; padding: 18px; }
   .drawer-primary { grid-template-columns: 1fr; }
   .drawer-task > div:last-child { flex-wrap: wrap; }
-  .manual-modal, .run-modal { width: calc(100vw - 24px); max-height: calc(100vh - 24px); padding: 17px; }
+  .manual-modal, .run-modal, .codex-launch-modal { width: calc(100vw - 24px); max-height: calc(100vh - 24px); padding: 17px; }
   .run-facts { grid-template-columns: repeat(2, 1fr); }
   .run-facts > span:nth-child(2) { border-right: 0; }
   .run-facts > span:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }

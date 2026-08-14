@@ -37,13 +37,16 @@ def dashboard_server(isolated_db, tmp_path):
         thread.join(timeout=5)
 
 
-def request_json(base: str, path: str, *, method: str = "GET", body=None):
+def request_json(base: str, path: str, *, method: str = "GET", body=None, headers=None):
     data = None if body is None else json.dumps(body).encode("utf-8")
     request = Request(
         base + path,
         data=data,
         method=method,
-        headers={"Content-Type": "application/json"} if data else {},
+        headers={
+            **({"Content-Type": "application/json"} if data else {}),
+            **(headers or {}),
+        },
     )
     with urlopen(request, timeout=5) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
@@ -184,3 +187,115 @@ def test_activity_endpoint_filters_by_project_task_and_session(
     assert len(payload["activity"]) == 1
     assert payload["activity"][0]["actor_name"] == "gemini"
     assert payload["activity"][0]["evidence"] == {"accepted": True}
+
+
+def test_codex_preview_returns_copy_fallback_and_records_activity(
+    dashboard_server, isolated_db, tmp_path, monkeypatch
+):
+    capability = {
+        "available": True,
+        "reason": None,
+        "server": "Codex Desktop test",
+        "methods": {
+            "thread/list": True, "thread/start": True,
+            "thread/resume": True, "turn/start": True,
+        },
+        "threads": [],
+        "linked_thread_found": False,
+    }
+    monkeypatch.setattr(webapp.codex_app, "inspect", lambda _cwd, _thread: capability)
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Codex Preview", repo_path=str(tmp_path), current_goal="Ship safely"
+        )
+        task_id = store.create_task(
+            conn,
+            project_id=project_id,
+            title="Preview a bounded handoff",
+            acceptance="Prompt includes the done-when check",
+            pm_session_id="pm-session",
+        )
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    status, payload = request_json(
+        dashboard_server,
+        f"/api/tasks/{task_id}/codex/preview",
+        method="POST",
+        body={},
+        headers={"X-Cortex-Action-Token": portfolio["action_token"]},
+    )
+    assert status == 200
+    assert payload["mode"] == "copy_prompt"
+    assert payload["start_enabled"] is False
+    assert payload["can_start_turn"] is False
+    assert payload["can_navigate"] is False
+    assert "Preview a bounded handoff" in payload["prompt"]
+    assert payload["capability"] == capability
+    with db.connect(isolated_db) as conn:
+        event = store.list_activity_events(conn, task_id=task_id)[0]
+    assert event["action"] == "codex.launch_previewed"
+    assert event["session_id"] == "pm-session"
+
+
+def test_codex_preview_rejects_missing_action_token_before_probe(
+    dashboard_server, isolated_db, tmp_path, monkeypatch
+):
+    called = False
+
+    def inspect(_cwd, _thread):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(webapp.codex_app, "inspect", inspect)
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(conn, name="Guarded", repo_path=str(tmp_path))
+        task_id = store.create_task(
+            conn, project_id=project_id, title="Guard me", acceptance="Guard passes"
+        )
+    with pytest.raises(HTTPError) as caught:
+        request_json(
+            dashboard_server,
+            f"/api/tasks/{task_id}/codex/preview",
+            method="POST",
+            body={},
+        )
+    assert caught.value.code == 403
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    ("privacy", "acceptance", "expected"),
+    [
+        ("restricted", "Safe result exists", "not allowed"),
+        ("internal", None, "done-when"),
+        ("internal", "Never expose sk-123456789012345678901234", "privacy scan"),
+    ],
+)
+def test_codex_preview_blocks_policy_scope_and_secrets(
+    dashboard_server, isolated_db, tmp_path, monkeypatch,
+    privacy, acceptance, expected,
+):
+    monkeypatch.setattr(
+        webapp.codex_app,
+        "inspect",
+        lambda _cwd, _thread: pytest.fail("blocked previews must not probe App Server"),
+    )
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name=f"Blocked {privacy}", repo_path=str(tmp_path), privacy=privacy
+        )
+        task_id = store.create_task(
+            conn, project_id=project_id, title="Blocked preview", acceptance=acceptance
+        )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    with pytest.raises(HTTPError) as caught:
+        request_json(
+            dashboard_server,
+            f"/api/tasks/{task_id}/codex/preview",
+            method="POST",
+            body={},
+            headers={"X-Cortex-Action-Token": portfolio["action_token"]},
+        )
+    assert caught.value.code == 400
+    assert expected in caught.value.read().decode("utf-8")

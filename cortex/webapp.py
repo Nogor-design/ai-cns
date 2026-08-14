@@ -8,8 +8,10 @@ frontend is a management surface over the same records used by the CLI.
 from __future__ import annotations
 
 import json
+import hmac
 import mimetypes
 import os
+import secrets
 import sqlite3
 import threading
 import webbrowser
@@ -21,8 +23,8 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
-    config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy, routing,
-    runlog, store, team, workers,
+    codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
+    routing, runlog, secrets_scan, store, team, workers,
 )
 
 WORKER_NAMES = ("codex", "claude", "gemini", "grok", "ollama", "perplexity")
@@ -323,6 +325,7 @@ class CortexDashboardServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.database_path = database_path
         self.static_root = static_root
+        self.action_token = secrets.token_urlsafe(32)
         with db.connect(database_path) as conn:
             interrupted = jobs.reconcile(conn)
         if interrupted:
@@ -383,7 +386,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/portfolio":
             with db.connect(self.server.database_path) as conn:
-                self._json(HTTPStatus.OK, portfolio_payload(conn))
+                payload = portfolio_payload(conn)
+                payload["action_token"] = self.server.action_token
+                self._json(HTTPStatus.OK, payload)
             return
         if path == "/api/activity":
             params = parse_qs(urlparse(self.path).query)
@@ -546,6 +551,59 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 self._json(HTTPStatus.ACCEPTED, {"task_id": task_id, "job_id": job_id})
                 return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "tasks"]
+                and parts[3:] == ["codex", "preview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    task = store.get_task(conn, parts[2])
+                    project = store.get_project(conn, task["project_id"])
+                    if not policy.is_allowed(project, "codex"):
+                        raise ValueError("Codex is not allowed to read this project")
+                    if not task["acceptance"]:
+                        raise ValueError("add a done-when check before copying a Codex prompt")
+                    prompt = codex_app.launch_prompt(project, task)
+                    findings = secrets_scan.scan(prompt, use_ollama=False)
+                    if findings:
+                        kinds = ", ".join(sorted({finding.kind for finding in findings}))
+                        raise ValueError(f"Codex prompt blocked by local privacy scan: {kinds}")
+                    capability = codex_app.inspect(
+                        project["repo_path"], task["codex_thread_id"]
+                    )
+                    store.create_activity_event(
+                        conn,
+                        project_id=project["id"],
+                        task_id=task["id"],
+                        actor_type="human",
+                        actor_name="owner",
+                        action="codex.launch_previewed",
+                        summary=f"Previewed Codex handoff for {task['title']}",
+                        source="dashboard",
+                        source_ref=task["codex_thread_id"] or task["id"],
+                        session_id=task["pm_session_id"],
+                        evidence={
+                            "available": capability["available"],
+                            "linked_thread_found": capability["linked_thread_found"],
+                            "methods": capability["methods"],
+                        },
+                    )
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "task_id": task["id"],
+                        "codex_thread_id": task["codex_thread_id"],
+                        "prompt": prompt,
+                        "capability": capability,
+                        "mode": "copy_prompt",
+                        "start_enabled": False,
+                        "can_start_turn": False,
+                        "can_navigate": False,
+                    },
+                )
+                return
             if path != "/api/tasks":
                 self._json(HTTPStatus.NOT_FOUND, {"error": "route not found"})
                 return
@@ -665,6 +723,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise TypeError("JSON body must be an object")
         return payload
+
+    def _allow_local_action(self) -> bool:
+        """Protect subprocess-backed actions from cross-site/browser requests."""
+        local_names = {"127.0.0.1", "localhost", "::1"}
+        host = urlparse(f"//{self.headers.get('Host', '')}").hostname
+        origin_header = self.headers.get("Origin")
+        origin = urlparse(origin_header).hostname if origin_header else None
+        supplied = self.headers.get("X-Cortex-Action-Token", "")
+        if host not in local_names or (origin is not None and origin not in local_names):
+            self._json(HTTPStatus.FORBIDDEN, {"error": "local dashboard origin required"})
+            return False
+        if not hmac.compare_digest(supplied, self.server.action_token):
+            self._json(HTTPStatus.FORBIDDEN, {"error": "invalid action token"})
+            return False
+        return True
 
     def _json(self, status: HTTPStatus, payload: Any) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
