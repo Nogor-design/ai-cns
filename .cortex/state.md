@@ -23,23 +23,23 @@ Python, React, SQLite, GitHub
 
 ## Open tasks
 - [ ] Spike GitHub Projects engineering mirror (research; open; owner: codex; progress: 0%)
-- [ ] Implement guarded Task Codex next bridge (code; running; owner: codex; progress: 0%; next: Publish the accepted PM control-plane baseline, then implement copy-prompt fallback and bridge capability detection)
+- [ ] Add owner-gated Codex execution bridge (code; blocked; owner: owner; progress: 0%; next: Owner decides whether Cortex may start or resume paid Codex turns from the dashboard.; blocked: Explicit owner authorization is required before Cortex may create or resume a Codex task or start a paid model turn.)
 
 ## Recent decisions (last ~10, newest first)
 - 2026-08-12 — Require Cortex updates at the start and close of every PM session — The owner needs durable attribution, drill-down evidence, and one visible next task without reconstructing chat history. — source: owner requirement 2026-08-12
 - 2026-08-12 — Use Cortex as the canonical portfolio control plane with GitHub Projects as the engineering mirror and Codex as the execution surface — This covers local and hosted projects, preserves AI attribution and evidence, and avoids duplicating GitHub-native collaboration. — source: Codex PM research 2026-08-12
 
 ## Recent activity (last 10, newest first)
-- 2026-08-14T13:49 — codex — Publish gate caught and resolved the transient worker-probe contract; focused test passed 10 consecutive runs, full Python suite passed, and dashboard tests/build passed. (publish.validation_completed)
-- 2026-08-14T13:49 — codex — Changed Resolve transient worker availability state test regression from open to done (task.status_changed)
-- 2026-08-14T13:48 — codex — Changed Resolve transient worker availability state test regression from done to open (task.status_changed)
-- 2026-08-14T13:47 — codex — Changed Implement guarded Task Codex next bridge from open to running (task.status_changed)
-- 2026-08-14T13:47 — codex — PM session started: Implement guarded Task Codex next bridge (pm.session_started)
-- 2026-08-12T20:06 — codex — Changed Verify Codex App Server start-resume integration from running to done (task.status_changed)
-- 2026-08-12T20:06 — codex — Accepted: live local probe proved exact-CWD discovery, persisted-thread resume, safe ephemeral start, and lifecycle notifications. Codex Desktop visibility was cross-checked by task ID; App Server has no desktop-navigation method, so standalone UI must retain copy-prompt fallback. (pm.session_closed)
-- 2026-08-12T20:06 — codex — Created work item: Implement guarded Task Codex next bridge (task.created)
-- 2026-08-12T20:04 — codex — Live Codex App Server probe verified exact-CWD thread listing, persisted-thread resume, safe ephemeral thread start, and lifecycle notification capture; Codex desktop project identity was matched by path. (integration.probed)
-- 2026-08-12T20:02 — codex — PM session started: Verify Codex App Server start-resume integration (pm.session_started)
+- 2026-08-14T14:06 — codex — Changed Implement guarded Task Codex next bridge from running to done (task.status_changed)
+- 2026-08-14T14:06 — codex — Accepted and pushed the safe copy-only Task Codex next phase; it cannot create/resume threads, start turns, spend tokens, or navigate Desktop. (pm.session_closed)
+- 2026-08-14T14:06 — codex — Codex verified the project drill-down, continuation preview, bounded prompt, copy confirmation, mobile layout, and clean browser console. (browser.verified)
+- 2026-08-14T14:06 — codex — Codex implemented and pushed the guarded copy-only bridge with exact-repository App Server capability inspection and local action guards. (implementation.pushed)
+- 2026-08-14T14:05 — codex — Add owner-gated Codex execution bridge is blocked by Implement guarded Task Codex next bridge (task.dependency_added)
+- 2026-08-14T14:05 — codex — Changed Add owner-gated Codex execution bridge from open to blocked (task.status_changed)
+- 2026-08-14T14:05 — codex — Created work item: Add owner-gated Codex execution bridge (task.created)
+- 2026-08-14T14:05 — Harvey — Harvey reviewed the bridge boundary and required an on-click, exact-repository, copy-only first release with no thread or turn mutations. (architecture.reviewed)
+- 2026-08-14T14:05 — codex — Updated work item: Implement guarded Task Codex next bridge (task.updated)
+- 2026-08-14T14:01 — owner — Previewed Codex handoff for Implement guarded Task Codex next bridge (codex.launch_previewed)
 
 ## Known risks / assumptions
 - The current GitHub CLI authorization lacks the `read:project` and `project` scopes needed for Project inspection and synchronization.
