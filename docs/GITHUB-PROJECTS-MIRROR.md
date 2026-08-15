@@ -95,9 +95,35 @@ exists.
 
 ## Live one-item acceptance gate
 
-The current GitHub CLI credential has `repo` and `workflow` access but not the
-required Project authorization. No live read or mutation is allowed until the
-owner completes GitHub's interactive authorization:
+The GitHub CLI credential has the required `project` scope. Authorization was
+verified read-only on 2026-08-15. The user account currently has one private,
+open Project (`#1`), with GitHub's 13 default fields and zero items;
+`Nogor-design/ai-cns` has Issues enabled and currently has zero issues.
+
+The first write still requires owner approval of this exact bounded preflight:
+
+1. Rename private user Project `#1` from its generated untitled name to
+   `Cortex Engineering Mirror`, add the Cortex-source-of-truth description and
+   README, and link `Nogor-design/ai-cns`.
+2. Preserve the existing `Todo`, `In Progress`, and `Done` Status option IDs,
+   normalize the display name to `In progress`, and add `Review` and `Blocked`.
+3. Add the twelve missing fields from the ownership table: seven text fields,
+   two single-select fields, one number field, and two date fields. This leaves
+   the Project at 25 total fields, below GitHub's 50-field limit.
+4. Create exactly one repository issue titled
+   `Spike GitHub Projects engineering mirror`, with Cortex task
+   `8cac6170cc12`, its acceptance evidence, and the source-of-truth boundary in
+   the issue body. Do not create any other issues or draft items.
+5. Add only that issue to Project `#1`, re-read the Project, and display the
+   stable issue and Project item node IDs before writing item fields.
+6. Apply the planner's Cortex-owned values with optimistic expected values,
+   verify them by re-read, persist the link and sync fingerprint locally, and
+   require the next plan to contain zero actions and zero conflicts.
+7. Change and restore one GitHub-owned issue attribute to prove the mirror does
+   not overwrite it, then run the duplicate/stale-link refusal probes without
+   remote writes.
+
+If authorization is ever missing on another machine, restore it interactively:
 
 ```powershell
 gh auth refresh -s project
