@@ -41,7 +41,7 @@ model decisions, privacy policy, and the single recommended next action.
 | Start date / Target date | Date | Cortex | Cortex to GitHub |
 | Risk | Single select | Cortex | Cortex to GitHub |
 | Worker | Text | Cortex | Cortex to GitHub |
-| Milestone | Text | Cortex | Cortex to GitHub |
+| Cortex Milestone | Text | Cortex | Cortex to GitHub |
 | Next action / Blocked reason | Text | Cortex | Cortex to GitHub |
 | Cortex Sync | Text fingerprint | Cortex | Cortex to GitHub |
 | Issue title, body, state, assignees, labels, native milestone | GitHub issue fields | GitHub | Never overwritten by mirror v1 |
@@ -95,12 +95,14 @@ exists.
 
 ## Live one-item acceptance gate
 
-The GitHub CLI credential has the required `project` scope. Authorization was
-verified read-only on 2026-08-15. The user account currently has one private,
-open Project (`#1`), with GitHub's 13 default fields and zero items;
-`Nogor-design/ai-cns` has Issues enabled and currently has zero issues.
+The GitHub CLI credential has the required `project` scope. The initial
+read-only inventory on 2026-08-15 found one private, open Project (`#1`) with
+GitHub's 13 default fields and zero items, while `Nogor-design/ai-cns` had
+Issues enabled and zero issues. The approved proof changed that exact empty
+baseline as recorded below.
 
-The first write still requires owner approval of this exact bounded preflight:
+The owner approved this exact bounded preflight, and Codex executed it on
+2026-08-15:
 
 1. Rename private user Project `#1` from its generated untitled name to
    `Cortex Engineering Mirror`, add the Cortex-source-of-truth description and
@@ -110,6 +112,9 @@ The first write still requires owner approval of this exact bounded preflight:
 3. Add the twelve missing fields from the ownership table: seven text fields,
    two single-select fields, one number field, and two date fields. This leaves
    the Project at 25 total fields, below GitHub's 50-field limit.
+   The Cortex-owned text field is named `Cortex Milestone` because GitHub
+   reserves `Milestone` for the native issue field, which the mirror never
+   overwrites.
 4. Create exactly one repository issue titled
    `Spike GitHub Projects engineering mirror`, with Cortex task
    `8cac6170cc12`, its acceptance evidence, and the source-of-truth boundary in
@@ -122,6 +127,26 @@ The first write still requires owner approval of this exact bounded preflight:
 7. Change and restore one GitHub-owned issue attribute to prove the mirror does
    not overwrite it, then run the duplicate/stale-link refusal probes without
    remote writes.
+
+### Live proof result
+
+- Private Project `#1` is now `Cortex Engineering Mirror`, linked to
+  `Nogor-design/ai-cns`, with exactly one item: public issue
+  [`#2`](https://github.com/Nogor-design/ai-cns/issues/2).
+- Stable identity is recorded as issue node `I_kwDOTC7hi88AAAABM6qslA` and
+  Project item node `PVTI_lAHODBDAWM4BNbW0zg2r2N4`; the final verified sync
+  marker is `v1:67ccb273a6df577c`.
+- GitHub reserves the native field name `Milestone`, so the live proof and
+  planner use `Cortex Milestone` for the Cortex-owned text value. GitHub's
+  native issue milestone remains GitHub-owned.
+- GitHub's default `Auto-close issue`, `Item closed`, `Pull request linked to
+  issue`, and `Pull request merged` workflows were disabled because they crossed
+  the declared Status/issue-state ownership boundary. `Item added to project`
+  and `Auto-add sub-issues to project` remain enabled.
+- A reversible issue-title change produced zero mirror actions and was restored;
+  the issue remains open while the Project item remains Done.
+- Duplicate and stale-link fixtures produced their named conflicts and zero
+  writes. The final complete re-read produced zero actions and zero conflicts.
 
 If authorization is ever missing on another machine, restore it interactively:
 

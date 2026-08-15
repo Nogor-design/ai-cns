@@ -185,6 +185,8 @@ def test_normalized_empty_and_numeric_values_do_not_loop():
 def test_field_ownership_and_planner_fields_cannot_drift():
     owned = {field["name"] for field in github_projects.FIELD_OWNERSHIP}
     assert owned == set(github_projects.desired_fields(task()))
+    assert "Cortex Milestone" in owned
+    assert "Milestone" not in owned
 
 
 def test_stored_item_with_different_content_is_reported_precisely():

@@ -566,6 +566,7 @@ def start_pm_session(
             updates: dict[str, Any] = {
                 "status": "running", "assignee": owner,
                 "pm_session_id": session_id,
+                "blocked_reason": None,
             }
             if acceptance is not None:
                 updates["acceptance"] = acceptance

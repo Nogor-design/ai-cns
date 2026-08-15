@@ -27,7 +27,7 @@ FIELD_OWNERSHIP: tuple[dict[str, str], ...] = (
     {"name": "Target date", "kind": "date", "owner": "cortex"},
     {"name": "Risk", "kind": "single_select", "owner": "cortex"},
     {"name": "Worker", "kind": "text", "owner": "cortex"},
-    {"name": "Milestone", "kind": "text", "owner": "cortex"},
+    {"name": "Cortex Milestone", "kind": "text", "owner": "cortex"},
     {"name": "Next action", "kind": "text", "owner": "cortex"},
     {"name": "Blocked reason", "kind": "text", "owner": "cortex"},
     {"name": SYNC_FIELD, "kind": "text", "owner": "cortex"},
@@ -99,7 +99,7 @@ def desired_fields(task: Mapping[str, Any]) -> dict[str, Any]:
         "Target date": _date_only(_value(task, "target_at") or _value(task, "due_at")),
         "Risk": str(_value(task, "risk", "auto")).replace("_", " ").title(),
         "Worker": _optional_text(_value(task, "assignee")),
-        "Milestone": _optional_text(_value(task, "milestone")),
+        "Cortex Milestone": _optional_text(_value(task, "milestone")),
         "Next action": _optional_text(_value(task, "next_action")),
         "Blocked reason": _optional_text(_value(task, "blocked_reason")),
     }

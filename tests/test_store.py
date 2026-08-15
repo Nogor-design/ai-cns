@@ -95,12 +95,14 @@ def test_decisions(conn, project):
 
 def test_pm_sessions_are_distinct_attributed_and_filterable(conn, project):
     task_id = store.create_task(
-        conn, project_id=project["id"], title="Manage the slice", actor_name="owner"
+        conn, project_id=project["id"], title="Manage the slice", actor_name="owner",
+        blocked_reason="Waiting on approval",
     )
     _, first_session = store.start_pm_session(
         conn, project_id=project["id"], task_id=task_id, title="First pass",
         owner="codex", codex_thread_id="thread-1",
     )
+    assert store.get_task(conn, task_id)["blocked_reason"] is None
     store.create_activity_event(
         conn,
         project_id=project["id"],
