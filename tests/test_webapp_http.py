@@ -232,7 +232,10 @@ def test_codex_preview_returns_copy_fallback_and_records_activity(
     assert "Preview a bounded handoff" in payload["prompt"]
     assert payload["capability"] == capability
     with db.connect(isolated_db) as conn:
-        event = store.list_activity_events(conn, task_id=task_id)[0]
+        event = next(
+            row for row in store.list_activity_events(conn, task_id=task_id)
+            if row["action"] == "codex.launch_previewed"
+        )
     assert event["action"] == "codex.launch_previewed"
     assert event["session_id"] == "pm-session"
 

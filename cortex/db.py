@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -308,6 +308,23 @@ def _apply_additive_migrations(conn: sqlite3.Connection) -> None:
                 )
 
 
+def _apply_identity_constraints(conn: sqlite3.Connection) -> None:
+    """Keep one Cortex task mapped to one stable GitHub identity.
+
+    These indexes run after additive migrations because older task tables do not
+    yet contain the GitHub columns when the main schema script is evaluated.
+    """
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_github_issue_id
+           ON tasks(github_issue_id) WHERE github_issue_id IS NOT NULL"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_github_project_item_id
+           ON tasks(github_project_item_id)
+           WHERE github_project_item_id IS NOT NULL"""
+    )
+
+
 class Connection(sqlite3.Connection):
     """A connection whose ``with`` block also closes it.
 
@@ -335,6 +352,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         return
     conn.executescript(SCHEMA)
     _apply_additive_migrations(conn)
+    _apply_identity_constraints(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 

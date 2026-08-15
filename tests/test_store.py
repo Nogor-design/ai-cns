@@ -220,3 +220,29 @@ def test_done_forces_full_progress_and_completion_time(conn, project):
     task = store.get_task(conn, task_id)
     assert task["progress"] == 100
     assert task["completed_at"]
+
+
+def test_github_node_ids_can_only_link_to_one_cortex_task(conn, project):
+    first = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="First linked task",
+        github_issue_id="I_same_issue",
+        github_project_item_id="PVTI_same_item",
+    )
+    with pytest.raises(ValueError, match="github_issue_id.*already linked"):
+        store.create_task(
+            conn,
+            project_id=project["id"],
+            title="Duplicate issue task",
+            github_issue_id="I_same_issue",
+        )
+
+    second = store.create_task(
+        conn, project_id=project["id"], title="Second unlinked task"
+    )
+    with pytest.raises(ValueError, match="github_project_item_id.*already linked"):
+        store.update_task(conn, second, github_project_item_id="PVTI_same_item")
+
+    store.update_task(conn, first, github_issue_id="I_same_issue")
+    assert store.get_task(conn, first)["github_issue_id"] == "I_same_issue"

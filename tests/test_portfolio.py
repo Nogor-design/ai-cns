@@ -61,7 +61,13 @@ def test_additive_migration_upgrades_old_database(tmp_path):
         "parent_id", "progress", "blocked_reason", "next_action", "codex_thread_id",
         "pm_session_id",
     } <= task_columns
-    assert upgraded.execute("pragma user_version").fetchone()[0] == 5
+    task_indexes = {
+        row["name"]: row["unique"]
+        for row in upgraded.execute("pragma index_list(tasks)").fetchall()
+    }
+    assert task_indexes["idx_tasks_github_issue_id"] == 1
+    assert task_indexes["idx_tasks_github_project_item_id"] == 1
+    assert upgraded.execute("pragma user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert upgraded.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='activity_events'"
     ).fetchone()
@@ -99,7 +105,7 @@ def test_early_v4_database_receives_final_pm_session_columns(tmp_path):
     }
     assert "pm_session_id" in task_columns
     assert "session_id" in activity_columns
-    assert upgraded.execute("pragma user_version").fetchone()[0] == 5
+    assert upgraded.execute("pragma user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_health_detects_dirty_repo(conn, project, git_repo):

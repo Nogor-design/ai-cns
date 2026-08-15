@@ -278,6 +278,11 @@ def create_task(
         parent = get_task(conn, parent_id)
         if parent["project_id"] != project_id:
             raise ValueError("parent task must belong to the same project")
+    _validate_github_task_links(
+        conn,
+        github_issue_id=github_issue_id,
+        github_project_item_id=github_project_item_id,
+    )
     tid = ids.short_id()
     ts = ids.now()
     conn.execute(
@@ -382,6 +387,15 @@ def update_task(
             raise ValueError("parent task must belong to the same project")
         if _parent_would_cycle(conn, task_id, fields["parent_id"]):
             raise ValueError("parent relationship would create a cycle")
+    if {"github_issue_id", "github_project_item_id"} & fields.keys():
+        _validate_github_task_links(
+            conn,
+            task_id=task_id,
+            github_issue_id=fields.get("github_issue_id", current["github_issue_id"]),
+            github_project_item_id=fields.get(
+                "github_project_item_id", current["github_project_item_id"]
+            ),
+        )
     if fields.get("status") == "done":
         fields.setdefault("completed_at", ids.now())
         fields["progress"] = 100
@@ -417,6 +431,33 @@ def update_task(
         )
     if commit:
         conn.commit()
+
+
+def _validate_github_task_links(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str | None = None,
+    github_issue_id: str | None = None,
+    github_project_item_id: str | None = None,
+) -> None:
+    for column, value in (
+        ("github_issue_id", github_issue_id),
+        ("github_project_item_id", github_project_item_id),
+    ):
+        if not value:
+            continue
+        params: tuple[Any, ...] = (value,)
+        exclusion = ""
+        if task_id:
+            exclusion = " AND id != ?"
+            params += (task_id,)
+        existing = conn.execute(
+            f"SELECT id FROM tasks WHERE {column} = ?{exclusion} LIMIT 1", params
+        ).fetchone()
+        if existing:
+            raise ValueError(
+                f"{column} is already linked to Cortex task {existing['id']}"
+            )
 
 
 def add_task_dependency(

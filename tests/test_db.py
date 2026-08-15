@@ -38,3 +38,21 @@ def test_connection_context_manager_closes_request_scoped_handle(isolated_db):
         assert "closed" in str(exc).lower()
     else:
         raise AssertionError("connection remained open after its with block")
+
+
+def test_v5_database_adds_unique_github_identity_indexes(isolated_db):
+    with db.connect(isolated_db) as conn:
+        conn.execute("DROP INDEX idx_tasks_github_issue_id")
+        conn.execute("DROP INDEX idx_tasks_github_project_item_id")
+        conn.execute("PRAGMA user_version = 5")
+
+    key = str(isolated_db.resolve())
+    db._initialised.discard(key)
+    with db.connect(isolated_db) as conn:
+        indexes = {
+            row["name"]: row["unique"]
+            for row in conn.execute("PRAGMA index_list(tasks)").fetchall()
+        }
+        assert indexes["idx_tasks_github_issue_id"] == 1
+        assert indexes["idx_tasks_github_project_item_id"] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
