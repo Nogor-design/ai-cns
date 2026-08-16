@@ -300,25 +300,51 @@ def create_project(
     privacy: str = "internal",
     state_mode: str = "tracked",
     project_id: str | None = None,
+    allowed_workers: str | list[str] | tuple[str, ...] | None = None,
+    actor_type: str = "system",
+    actor_name: str | None = None,
+    source: str = "cortex",
+    record_activity: bool = False,
+    commit: bool = True,
 ) -> str:
     priority = max(1, min(5, priority))
     if privacy not in PRIVACY_LEVELS:
         privacy = "internal"
     if state_mode not in STATE_MODES:
         state_mode = "tracked"
+    if allowed_workers is not None:
+        from . import policy
+
+        allowed_workers = policy.encode(
+            allowed_workers
+            if isinstance(allowed_workers, (list, tuple, set))
+            else str(allowed_workers).replace(",", "\n").split()
+        )
     pid = project_id or ids.slugify(name)
     ts = ids.now()
     conn.execute(
         """INSERT INTO projects
            (id, name, repo_path, stack, status, program, priority, privacy,
-            state_mode, current_goal, test_command, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            state_mode, current_goal, test_command, allowed_workers, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             pid, name, repo_path, stack, "active", program, priority, privacy,
-            state_mode, current_goal, test_command, ts,
+            state_mode, current_goal, test_command, allowed_workers, ts,
         ),
     )
-    conn.commit()
+    if record_activity:
+        _insert_activity(
+            conn,
+            project_id=pid,
+            actor_type=actor_type,
+            actor_name=actor_name or "cortex",
+            action="project.created",
+            summary=f"Registered project: {name}",
+            source=source,
+            source_ref=pid,
+        )
+    if commit:
+        conn.commit()
     return pid
 
 

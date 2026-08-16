@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, Bot, CalendarRange, Check, CheckCircle2, ChevronRight, CircleAlert,
-  CirclePlay, Clock3, Copy, Cpu, FolderGit2, GitBranch, Gauge, LayoutDashboard,
+  CirclePlay, Clock3, Copy, Cpu, FolderGit2, FolderPlus, GitBranch, Gauge, LayoutDashboard,
   Github, LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
   Search, ShieldCheck, Sparkles, UsersRound, UserRound, WandSparkles, X,
 } from 'lucide-react'
 import { filterAndGroupTimeline } from './timeline.js'
 import { mirrorActionLabel, mirrorStatusMeta } from './githubMirror.js'
 import RoadmapView from './RoadmapView.jsx'
+import AddProjectModal from './AddProjectModal.jsx'
 
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
@@ -121,7 +122,7 @@ function WorkerBadge({ name, recommended = false }) {
 function StatusPill({ value }) { return <span className={`status-pill status-${value}`}>{pretty(value)}</span> }
 function Priority({ value }) { return <span className={`priority p${value}`}>P{value}</span> }
 
-function Sidebar({ data, active, onChange, selectedId, onSelect }) {
+function Sidebar({ data, active, onChange, selectedId, onSelect, onAddProject }) {
   const activeProjects = data.projects.filter(project => project.status === 'active').sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name))
   return (
     <aside className="sidebar">
@@ -129,7 +130,7 @@ function Sidebar({ data, active, onChange, selectedId, onSelect }) {
       <nav aria-label="Portfolio views">
         {navItems.map(([id, label, Icon]) => <button key={id} className={active === id ? 'active' : ''} onClick={() => onChange(id)}><Icon size={17} /><span>{label}</span>{id === 'paused' && <em>{data.summary.paused_projects}</em>}</button>)}
       </nav>
-      <div className="project-rail-title"><span>Active projects</span><em>{activeProjects.length}</em></div>
+      <div className="project-rail-title"><span>Active projects</span><em>{activeProjects.length}</em><button type="button" onClick={onAddProject} aria-label="Add project"><FolderPlus size={13} />Add</button></div>
       <div className="project-rail">
         {activeProjects.map(project => (
           <button key={project.project_id} className={selectedId === project.project_id ? 'selected' : ''} onClick={() => onSelect(project.project_id)}>
@@ -484,6 +485,7 @@ export default function App() {
   const [timelineProjectId, setTimelineProjectId] = useState(null)
   const [codexLaunch, setCodexLaunch] = useState(null)
   const [githubLaunch, setGithubLaunch] = useState(null)
+  const [showAddProject, setShowAddProject] = useState(false)
   const pollRef = useRef(null)
 
   async function load(silent = false) { if (!silent) setError(''); try { const [portfolio, jobPayload] = await Promise.all([request('/api/portfolio'), request('/api/jobs')]); setData({ ...portfolio, jobs: jobPayload.jobs }) } catch (err) { setError(err.message) } }
@@ -586,6 +588,26 @@ export default function App() {
       return false
     }
   }
+  async function previewProject(repoPath) {
+    const payload = await request('/api/projects/preview', {
+      method: 'POST',
+      body: JSON.stringify({ repo_path: repoPath }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    return payload.preview
+  }
+  async function registerProject(fields) {
+    const payload = await request('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify(fields),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    setSelectedId(payload.project.id)
+    setActiveNav('projects')
+    setToast(`${payload.project.name} added to Cortex`)
+    return payload
+  }
   async function updateAllowlist(projectId, allowed) { try { await request(`/api/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify({ allowed_workers: allowed }) }); setToast(`Allowlist updated: ${allowed.join(', ')}`); await load(true) } catch (err) { setError(err.message) } }
   async function dismissSuggestion(id) { try { await request(`/api/suggestions/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'dismissed' }) }); setToast('Suggestion dismissed'); await load(true) } catch (err) { setError(err.message) } }
   async function keepTeamWorking() { try { const payload = await request('/api/team/keep-working', { method: 'POST', body: JSON.stringify({ limit: 3 }) }); if (!payload.job_ids.length) { setToast('No safe approved assignments are waiting; ask the PM to plan a project'); await load(true); return } watchJob(payload.job_ids[0], 'Starting team') } catch (err) { setError(err.message) } }
@@ -629,7 +651,7 @@ export default function App() {
   if (!data) return <div className="app-loading error"><CircleAlert size={24} /><strong>Dashboard unavailable</strong><span>{error}</span><button onClick={() => load()}><RotateCcw size={15} />Retry</button></div>
 
   return <div className="app-shell">
-    <Sidebar data={data} active={activeNav} onChange={changeNav} selectedId={selectedId} onSelect={setSelectedId} />
+    <Sidebar data={data} active={activeNav} onChange={changeNav} selectedId={selectedId} onSelect={setSelectedId} onAddProject={() => setShowAddProject(true)} />
     <div className={`content-shell ${selected ? 'drawer-open' : ''}`}><main>
       <header className="topbar"><div><span className="eyebrow">Local AI control plane</span><strong>Cortex Portfolio</strong></div><div><label className="search"><Search size={15} /><input aria-label="Search projects" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search projects" /></label><button className="icon-button" onClick={() => load()} aria-label="Refresh"><RefreshCw size={16} /></button></div></header>
       {error && <div className="error-banner"><CircleAlert size={15} /><span>{error}</span><button onClick={() => setError('')}><X size={14} /></button></div>}
@@ -653,6 +675,7 @@ export default function App() {
     <RunModal run={selectedRun} onClose={() => setSelectedRun(null)} />
     <CodexLaunchModal launch={codexLaunch} onClose={() => setCodexLaunch(null)} onCopied={() => setToast('Bounded Codex prompt copied')} />
     <GitHubMirrorModal launch={githubLaunch} onClose={() => setGithubLaunch(null)} onCopied={kind => setToast(kind === 'resume' ? 'Recovery command copied; review before running' : 'Approved apply command copied; review before running')} />
+    {showAddProject && <AddProjectModal onClose={() => setShowAddProject(false)} onPreview={previewProject} onRegister={registerProject} />}
     {toast && <div className="toast"><Check size={15} />{toast}</div>}
   </div>
 }

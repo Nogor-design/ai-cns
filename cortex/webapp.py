@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
+    project_registration,
     github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
 )
 
@@ -655,6 +656,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parts = [part for part in path.split("/") if part]
         try:
             body = self._body()
+            if path == "/api/projects/preview":
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_registration.preview(conn, body.get("repo_path"))
+                self._json(HTTPStatus.OK, {"preview": payload})
+                return
+            if path == "/api/projects":
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    result = project_registration.register(conn, body)
+                    project = _row_dict(result.pop("project"))
+                self._json(HTTPStatus.CREATED, {"project": project, **result})
+                return
             if path == "/api/continue":
                 project_id = body.get("project_id")
                 with db.connect(self.server.database_path) as conn:
@@ -814,7 +830,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 task = _row_dict(store.get_task(conn, task_id))
             self._json(HTTPStatus.CREATED, {"task": task})
         except (
-            KeyError, TypeError, ValueError, store.NotFound,
+            KeyError, TypeError, ValueError, OSError, sqlite3.IntegrityError, store.NotFound,
             github_reader.GitHubProjectError, github_adapter.MirrorApplyError,
         ) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})

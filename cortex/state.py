@@ -55,6 +55,22 @@ def write_state(repo_path: str | Path, content: str) -> Path:
     return path
 
 
+def write_initial_state(repo_path: str | Path, content: str) -> Path:
+    """Create a starter state document without overwriting owner work."""
+    path = config.state_path(repo_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            created = True
+            handle.write(content)
+    except Exception:
+        if created and path.is_file():
+            path.unlink()
+        raise
+    return path
+
+
 def read_state(repo_path: str | Path) -> str | None:
     path = config.state_path(repo_path)
     if path.exists():

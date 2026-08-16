@@ -159,6 +159,61 @@ def test_project_allowlist_can_be_updated_over_http(
     assert project["allowlist_configured"] is True
 
 
+def test_guided_project_preview_and_registration_require_local_action_token(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "guided-http"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text(
+        "[project]\nname='guided-http'\n[tool.pytest.ini_options]\n",
+        encoding="utf-8",
+    )
+    status, portfolio = request_json(dashboard_server, "/api/portfolio")
+    assert status == 200
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+
+    with pytest.raises(HTTPError) as missing_token:
+        request_json(
+            dashboard_server, "/api/projects/preview", method="POST",
+            body={"repo_path": str(repo)},
+        )
+    assert missing_token.value.code == 403
+
+    status, payload = request_json(
+        dashboard_server, "/api/projects/preview", method="POST",
+        body={"repo_path": str(repo)}, headers=headers,
+    )
+    assert status == 200
+    assert payload["preview"]["stack"] == "Python"
+    assert payload["preview"]["test_command"] == "python -m pytest -q"
+
+    status, created = request_json(
+        dashboard_server, "/api/projects", method="POST", headers=headers,
+        body={
+            "repo_path": str(repo),
+            "name": "Guided HTTP",
+            "program": "portfolio intake",
+            "priority": 2,
+            "privacy": "restricted",
+            "stack": payload["preview"]["stack"],
+            "test_command": payload["preview"]["test_command"],
+            "current_goal": "Make registration dependable",
+            "allowed_workers": ["ollama"],
+            "track_state": True,
+        },
+    )
+    assert status == 201
+    assert created["project"]["id"] == "guided-http"
+    assert created["state_created"] is True
+    assert (repo / ".cortex" / "state.md").is_file()
+    with db.connect(isolated_db) as conn:
+        project = store.get_project(conn, "guided-http")
+        assert json.loads(project["allowed_workers"]) == ["ollama"]
+        event = store.list_activity_events(conn, "guided-http")[0]
+        assert event["actor_name"] == "owner"
+        assert event["source"] == "dashboard"
+
+
 def test_dashboard_schedule_patch_is_attributed_to_the_human_owner(
     dashboard_server, isolated_db, tmp_path
 ):

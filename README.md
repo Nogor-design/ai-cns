@@ -98,6 +98,12 @@ build; later launches go straight to `http://127.0.0.1:8765`. Use `-Rebuild`
 after changing frontend source, `-NoOpen` to suppress browser launch, or a
 different local port with `-Port 8877`.
 
+To register another local project, click **Add** beside **Active projects**.
+The guided flow validates the folder, previews detected stack and test
+metadata, lets you set privacy and allowed AI workers, and shows a final review
+before writing anything. Registration stays local, never overwrites an
+existing `.cortex/state.md`, and does not contact an AI provider or GitHub.
+
 Open **Roadmap** for the portfolio schedule. It uses one shared Gantt-style
 time axis while keeping three kinds of evidence explicit: planned bars come
 only from recorded start/target/due dates, completed bars show the observed
