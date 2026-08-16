@@ -51,6 +51,32 @@ The Project `Status` options are `Todo`, `In progress`, `Review`, `Blocked`, and
 `Done`; priorities are `P1` through `P5`; risks are `Auto`, `Low`, `Medium`, and
 `High`. This uses 13 Project fields, below GitHub's 50-field Project limit.
 
+## Operational views and insights
+
+Project `#1` has three saved views. They are deliberately small so the same
+item can move from portfolio triage to execution without duplicating work:
+
+| View | Layout | Saved configuration |
+| --- | --- | --- |
+| Work Queue | Table | Title, Status, Priority, Progress, Worker, Start date, Target date, Risk, Next action, Blocked reason, and Cortex Project |
+| Flow | Board | GitHub's Status columns (`Todo`, `In progress`, `Review`, `Blocked`, and `Done`) with Title, Status, Priority, Worker, Risk, Progress, and Next action on each card |
+| Timeline | Roadmap | Start date is the start field and Target date is the target field |
+
+The first proof item renders as a one-day roadmap item on 2026-08-15. This is
+proof data, not a fabricated future estimate. Future mirrored tasks should use
+their real Cortex dates; tasks without dates remain visible in Work Queue and
+Flow without implying a schedule.
+
+Insights contains two custom count charts: `Work by status` and
+`Work by priority`. GitHub does not offer the custom text `Worker` field as a
+chart axis, so worker attribution is intentionally inspected in Work Queue and
+on Flow cards. The default Burn up chart remains available. With one approved
+proof item these charts are sparse by design and become useful as additional
+owner-approved linked issues are mirrored.
+
+The saved view and chart configuration did not create another issue, draft
+item, scheduled sync, GitHub Action, or paid model execution.
+
 `Cortex Sync` is a versioned fingerprint of all Cortex-owned values. The same
 fingerprint and the exact last-written logical values are kept in
 `tasks.sync_state` only after a remote re-read verifies the write. On the next
@@ -135,7 +161,8 @@ The owner approved this exact bounded preflight, and Codex executed it on
   [`#2`](https://github.com/Nogor-design/ai-cns/issues/2).
 - Stable identity is recorded as issue node `I_kwDOTC7hi88AAAABM6qslA` and
   Project item node `PVTI_lAHODBDAWM4BNbW0zg2r2N4`; the final verified sync
-  marker is `v1:67ccb273a6df577c`.
+  marker is `v1:4ca5a8f04b73374b` after the proof item's verified one-day date
+  span was added for the Timeline acceptance check.
 - GitHub reserves the native field name `Milestone`, so the live proof and
   planner use `Cortex Milestone` for the Cortex-owned text value. GitHub's
   native issue milestone remains GitHub-owned.
