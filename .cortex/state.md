@@ -23,23 +23,23 @@ Python, React, SQLite, GitHub
 
 ## Open tasks
 - [ ] Add owner-gated Codex execution bridge (code; blocked; owner: owner; progress: 0%; next: Owner decides whether Cortex may start or resume paid Codex turns from the dashboard.; blocked: Explicit owner authorization is required before Cortex may create or resume a Codex task or start a paid model turn.)
-- [ ] Review and merge Cortex control-plane draft PR #1 (review; review; owner: owner; progress: 100%; next: Review guided Add Project workflow at commit 2f10af4 in draft PR #1; if accepted, approve the exact latest PR head for merge)
+- [ ] Review and merge Cortex control-plane draft PR #1 (review; review; owner: owner; progress: 100%; next: Review guarded Remove from Cortex workflow at feature commit 2398fb1 in draft PR #1)
 
 ## Recent decisions (last ~10, newest first)
 - 2026-08-12 — Require Cortex updates at the start and close of every PM session — The owner needs durable attribution, drill-down evidence, and one visible next task without reconstructing chat history. — source: owner requirement 2026-08-12
 - 2026-08-12 — Use Cortex as the canonical portfolio control plane with GitHub Projects as the engineering mirror and Codex as the execution surface — This covers local and hosted projects, preserves AI attribution and evidence, and avoids duplicating GitHub-native collaboration. — source: Codex PM research 2026-08-12
 
 ## Recent activity (last 10, newest first)
+- 2026-08-16T13:20 — codex — Updated work item: Review and merge Cortex control-plane draft PR #1 (task.updated)
+- 2026-08-16T13:20 — codex — Implemented and verified guarded Remove from Cortex workflow; feature commit 2398fb1 is ready in draft PR #1. (pm.session_closed)
+- 2026-08-16T13:20 — codex — Changed Add guarded project removal to the dashboard from running to done (task.status_changed)
+- 2026-08-16T13:20 — codex — Guarded project removal shipped locally with exact-record preview, exact-name confirmation, transactional deletion, active-work blockers, preserved repository and external resources, durable owner-attributed audit, 191 Python tests, 11 dashboard tests, production build, and isolated desktop/mobile browser QA. (dashboard.project_removal_verified)
+- 2026-08-16T13:01 — codex — PM session started: Add guarded project removal to the dashboard (pm.session_started)
+- 2026-08-16T13:01 — codex — Changed Add guarded project removal to the dashboard from open to running (task.status_changed)
+- 2026-08-16T13:01 — codex — Created work item: Add guarded project removal to the dashboard (task.created)
 - 2026-08-16T04:17 — codex — Changed Add guided project registration to the dashboard from running to done (task.status_changed)
 - 2026-08-16T04:17 — codex — Updated work item: Review and merge Cortex control-plane draft PR #1 (task.updated)
 - 2026-08-16T04:17 — codex — Added guarded local project preview and registration with explicit privacy, worker allowlist, state-file choice, attribution, duplicate protection, and responsive UI (pm.session_closed)
-- 2026-08-16T04:17 — codex — Guided Add Project workflow passed API, full-suite, build, desktop, and mobile verification (dashboard.project_registration_verified)
-- 2026-08-16T03:58 — codex — PM session started: Add guided project registration to the dashboard (pm.session_started)
-- 2026-08-16T03:58 — codex — Changed Add guided project registration to the dashboard from open to running (task.status_changed)
-- 2026-08-16T03:58 — codex — Created work item: Add guided project registration to the dashboard (task.created)
-- 2026-08-16T03:26 — codex — Roadmap delivery is published on draft PR #1 at 5837dd6 with all six CI jobs green; the real merge remains owner-gated. (pm.session_closed)
-- 2026-08-16T03:26 — codex — Published Roadmap feature c08cf62 and Cortex state 5837dd6 to draft PR #1; all six push and pull_request jobs passed on Ubuntu, Windows, and the dashboard production build. (delivery.published)
-- 2026-08-16T03:26 — codex — Changed Add local portfolio roadmap and Gantt view from running to done (task.status_changed)
 
 ## Known risks / assumptions
 - The one-task GitHub adapter is implemented and every live apply remains exact-fingerprint gated; bulk mirroring, automatic issue creation, background polling, and scheduled sync do not exist.
