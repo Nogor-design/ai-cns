@@ -23,23 +23,23 @@ Python, React, SQLite, GitHub
 
 ## Open tasks
 - [ ] Add owner-gated Codex execution bridge (code; blocked; owner: owner; progress: 0%; next: Owner decides whether Cortex may start or resume paid Codex turns from the dashboard.; blocked: Explicit owner authorization is required before Cortex may create or resume a Codex task or start a paid model turn.)
-- [ ] Review and merge Cortex control-plane draft PR #1 (review; review; owner: owner; progress: 100%; next: Open the local dashboard and draft PR #1, review commit 9ced348, then choose approve-for-merge or request changes.)
+- [ ] Review and merge Cortex control-plane draft PR #1 (review; review; owner: owner; progress: 100%; next: Review draft PR #1 at feature commit c08cf62 plus the following Cortex state closeout commit; approve the exact branch for merge or record requested changes.)
 
 ## Recent decisions (last ~10, newest first)
 - 2026-08-12 — Require Cortex updates at the start and close of every PM session — The owner needs durable attribution, drill-down evidence, and one visible next task without reconstructing chat history. — source: owner requirement 2026-08-12
 - 2026-08-12 — Use Cortex as the canonical portfolio control plane with GitHub Projects as the engineering mirror and Codex as the execution surface — This covers local and hosted projects, preserves AI attribution and evidence, and avoids duplicating GitHub-native collaboration. — source: Codex PM research 2026-08-12
 
 ## Recent activity (last 10, newest first)
+- 2026-08-16T03:22 — codex — Updated work item: Review and merge Cortex control-plane draft PR #1 (task.updated)
+- 2026-08-16T03:22 — codex — Changed Add local portfolio roadmap and Gantt view from running to done (task.status_changed)
+- 2026-08-16T03:22 — codex — Accepted local Roadmap/Gantt at c08cf62: planned, observed, and unscheduled evidence are distinct; task drill-down and local schedule editing are available; API/build/test/browser acceptance passed. (pm.session_closed)
+- 2026-08-16T03:22 — codex — Codex added and verified the local portfolio Roadmap with deterministic schedule semantics, dependency evidence, schedule editing, and responsive desktop/mobile layouts; 176 Python tests, 11 dashboard tests, build, and zero browser console warnings passed. (dashboard.roadmap_verified)
+- 2026-08-16T03:08 — grok — Grok's UTF-8 product review conditionally approved the roadmap and correctly identified three implementation gates: lock truthful classification/bar geometry, attribute dashboard schedule edits to the human owner, and keep a slim historical roadmap payload with deterministic active/recent/all scopes. Codex verified those findings against the repository and adopted them. (review.accepted)
+- 2026-08-16T03:08 — codex — The first automatic product-review attempt failed in the Windows cp1252 reader before producing a usable artifact; Codex accepted no findings from that attempt and reran the same bounded review in UTF-8 mode. (review.rejected)
+- 2026-08-16T03:03 — codex — Changed Add local portfolio roadmap and Gantt view from open to running (task.status_changed)
+- 2026-08-16T03:03 — codex — PM session started: Add local portfolio roadmap and Gantt view (pm.session_started)
+- 2026-08-16T03:03 — codex — Created work item: Add local portfolio roadmap and Gantt view (task.created)
 - 2026-08-16T01:40 — codex — Changed Expose GitHub mirror readiness and dry-run in dashboard from running to done (task.status_changed)
-- 2026-08-16T01:40 — codex — Delivered and published the on-demand read-only GitHub mirror dashboard preview at commit 9ced348. It shows setup, target, stable identities, fresh plans, conflicts, durable recovery, and exact copy-only commands; 174 Python tests, 6 frontend tests, production build, desktop/mobile browser verification, and all six GitHub CI jobs pass. (pm.session_closed)
-- 2026-08-16T01:40 — codex — Changed Review and merge Cortex control-plane draft PR #1 from open to review (task.status_changed)
-- 2026-08-16T01:39 — codex — Created work item: Review and merge Cortex control-plane draft PR #1 (task.created)
-- 2026-08-16T01:39 — codex — Published commit 9ced348 to draft PR #1; all push and pull_request CI jobs pass on Ubuntu, Windows, and the dashboard production build. (delivery.published)
-- 2026-08-16T01:36 — codex — Verified the explicit-click GitHub mirror preview: guarded read-only API, setup/action/conflict/recovery states, exact copy-only CLI command, desktop and 390px browser flows, no apply control, and clean browser logs. (dashboard.github_preview_verified)
-- 2026-08-16T01:21 — codex — Changed Expose GitHub mirror readiness and dry-run in dashboard from open to running (task.status_changed)
-- 2026-08-16T01:21 — codex — PM session started: Expose GitHub mirror readiness and dry-run in dashboard (pm.session_started)
-- 2026-08-16T01:18 — codex — Updated work item: Implement opt-in GitHub Project mirror adapter (task.updated)
-- 2026-08-16T01:18 — codex — Accepted the opt-in GitHub Project adapter: complete read-only inventory, strict dry-run, exact issue linking, approval fingerprints, durable idempotent/resumable one-task apply, atomic verified local evidence, protected adapter-owned fields, live zero-write convergence, and full automated verification. (pm.session_closed)
 
 ## Known risks / assumptions
 - The one-task GitHub adapter is implemented and every live apply remains exact-fingerprint gated; bulk mirroring, automatic issue creation, background polling, and scheduled sync do not exist.
