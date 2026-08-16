@@ -68,6 +68,8 @@ class MirrorPlan:
     project_id: str | None
     issue_id: str | None
     project_item_id: str | None
+    snapshot_digest: str
+    fingerprint: str
     actions: tuple[MirrorAction, ...]
     conflicts: tuple[MirrorConflict, ...]
 
@@ -81,6 +83,8 @@ class MirrorPlan:
             "project_id": self.project_id,
             "issue_id": self.issue_id,
             "project_item_id": self.project_item_id,
+            "snapshot_digest": self.snapshot_digest,
+            "fingerprint": self.fingerprint,
             "safe_to_apply": self.safe_to_apply,
             "actions": [asdict(action) for action in self.actions],
             "conflicts": [asdict(conflict) for conflict in self.conflicts],
@@ -110,7 +114,10 @@ def desired_fields(task: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def build_mirror_plan(
-    task: Mapping[str, Any], snapshot: Mapping[str, Any]
+    task: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    *,
+    require_schema: bool = False,
 ) -> MirrorPlan:
     """Reconcile one already-linked issue without performing any mutation.
 
@@ -122,7 +129,19 @@ def build_mirror_plan(
     project_id = _optional_text(snapshot.get("project_id"))
     issue_id = _optional_text(_value(task, "github_issue_id"))
     stored_item_id = _optional_text(_value(task, "github_project_item_id"))
+    snapshot_digest = _snapshot_digest(snapshot)
     conflicts: list[MirrorConflict] = []
+
+    def finish(item_id: str | None, actions: Any, found_conflicts: Any) -> MirrorPlan:
+        return _plan(
+            task_id,
+            project_id,
+            issue_id,
+            item_id,
+            actions,
+            found_conflicts,
+            snapshot_digest=snapshot_digest,
+        )
 
     if not project_id:
         conflicts.append(MirrorConflict(
@@ -142,8 +161,14 @@ def build_mirror_plan(
             "All Project item pages must be read before Cortex can prove an item is absent.",
             {"items_complete": snapshot.get("items_complete")},
         ))
+    if require_schema and snapshot.get("field_schema_complete") is not True:
+        conflicts.append(MirrorConflict(
+            "incomplete_project_field_schema",
+            "All Project field pages must be read before Cortex can bind actions to field IDs.",
+            {"field_schema_complete": snapshot.get("field_schema_complete")},
+        ))
     if conflicts:
-        return _plan(task_id, project_id, issue_id, stored_item_id, (), conflicts)
+        return finish(stored_item_id, (), conflicts)
 
     items = [dict(item) for item in snapshot.get("items", [])]
     content_matches = [item for item in items if item.get("content_id") == issue_id]
@@ -168,7 +193,7 @@ def build_mirror_plan(
             },
         ))
     if conflicts:
-        return _plan(task_id, project_id, issue_id, stored_item_id, (), conflicts)
+        return finish(stored_item_id, (), conflicts)
 
     item = content_matches[0] if content_matches else None
     if item is None:
@@ -187,20 +212,20 @@ def build_mirror_plan(
                         "expected_content_id": issue_id,
                     },
                 ))
-                return _plan(task_id, project_id, issue_id, stored_item_id, (), conflicts)
+                return finish(stored_item_id, (), conflicts)
             conflicts.append(MirrorConflict(
                 "missing_remote_project_item",
                 "Cortex stores a Project item ID that is absent from the current Project snapshot.",
                 {"stored_item_id": stored_item_id},
             ))
-            return _plan(task_id, project_id, issue_id, stored_item_id, (), conflicts)
+            return finish(stored_item_id, (), conflicts)
         action = MirrorAction(
             "add_project_item",
             project_id,
             value={"content_id": issue_id},
             reason="Link the existing issue; re-read the Project before setting fields.",
         )
-        return _plan(task_id, project_id, issue_id, None, (action,), ())
+        return finish(None, (action,), ())
 
     item_id = _optional_text(item.get("id"))
     if not item_id:
@@ -209,14 +234,14 @@ def build_mirror_plan(
             "The matching Project item has no stable node ID.",
             {"content_id": issue_id},
         ))
-        return _plan(task_id, project_id, issue_id, stored_item_id, (), conflicts)
+        return finish(stored_item_id, (), conflicts)
     if stored_item_id and stored_item_id != item_id:
         conflicts.append(MirrorConflict(
             "stale_project_item_link",
             "The stored Project item ID disagrees with the item containing the linked issue.",
             {"stored_item_id": stored_item_id, "observed_item_id": item_id},
         ))
-        return _plan(task_id, project_id, issue_id, item_id, (), conflicts)
+        return finish(item_id, (), conflicts)
 
     try:
         desired = desired_fields(task)
@@ -226,7 +251,14 @@ def build_mirror_plan(
             "A Cortex-owned value cannot be normalized safely for GitHub.",
             {"error": str(exc)},
         ))
-        return _plan(task_id, project_id, issue_id, item_id, (), conflicts)
+        return finish(item_id, (), conflicts)
+    if require_schema and item.get("fields_complete") is not True:
+        conflicts.append(MirrorConflict(
+            "incomplete_item_fields",
+            "All field-value pages for the linked Project item must be read before planning writes.",
+            {"item_id": item_id, "fields_complete": item.get("fields_complete")},
+        ))
+        return finish(item_id, (), conflicts)
     observed = dict(item.get("fields") or {})
     observed_marker = observed.get(SYNC_FIELD)
     try:
@@ -237,7 +269,11 @@ def build_mirror_plan(
             "Cortex's stored GitHub sync evidence cannot be parsed safely.",
             {"error": str(exc)},
         ))
-        return _plan(task_id, project_id, issue_id, item_id, (), conflicts)
+        return finish(item_id, (), conflicts)
+    if require_schema:
+        _validate_project_schema(desired, snapshot, conflicts)
+        if conflicts:
+            return finish(item_id, (), conflicts)
     if last_sync:
         last_marker = last_sync.get("fingerprint")
         if observed_marker != last_marker:
@@ -246,7 +282,7 @@ def build_mirror_plan(
                 "The GitHub sync marker differs from Cortex's last verified write.",
                 {"expected": last_marker, "observed": observed_marker},
             ))
-            return _plan(task_id, project_id, issue_id, item_id, (), conflicts)
+            return finish(item_id, (), conflicts)
         changed_since_sync = [
             field for field, value in dict(last_sync.get("fields") or {}).items()
             if not _equal(field, observed.get(field), value)
@@ -257,14 +293,14 @@ def build_mirror_plan(
                 "A Cortex-owned field changed in GitHub after the last verified mirror.",
                 {"fields": changed_since_sync, "sync": last_marker},
             ))
-            return _plan(task_id, project_id, issue_id, item_id, (), conflicts)
+            return finish(item_id, (), conflicts)
     elif observed_marker:
         conflicts.append(MirrorConflict(
             "missing_local_sync_state",
             "GitHub contains a Cortex sync marker but Cortex has no matching verified state.",
             {"observed": observed_marker},
         ))
-        return _plan(task_id, project_id, issue_id, item_id, (), conflicts)
+        return finish(item_id, (), conflicts)
 
     actions: list[MirrorAction] = []
     if not stored_item_id:
@@ -299,7 +335,7 @@ def build_mirror_plan(
             expected=_value(task, "sync_state"),
             reason="Persist only after a re-read verifies every remote field mutation.",
         ))
-    return _plan(task_id, project_id, issue_id, item_id, actions, ())
+    return finish(item_id, actions, ())
 
 
 def _plan(
@@ -309,15 +345,100 @@ def _plan(
     item_id: str | None,
     actions: Any,
     conflicts: Any,
+    *,
+    snapshot_digest: str,
 ) -> MirrorPlan:
+    action_tuple = tuple(actions)
+    conflict_tuple = tuple(conflicts)
+    fingerprint = _plan_fingerprint(
+        task_id=task_id,
+        project_id=project_id,
+        issue_id=issue_id,
+        item_id=item_id,
+        snapshot_digest=snapshot_digest,
+        actions=action_tuple,
+        conflicts=conflict_tuple,
+    )
     return MirrorPlan(
         task_id,
         project_id,
         issue_id,
         item_id,
-        tuple(actions),
-        tuple(conflicts),
+        snapshot_digest,
+        fingerprint,
+        action_tuple,
+        conflict_tuple,
     )
+
+
+def _validate_project_schema(
+    desired: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    conflicts: list[MirrorConflict],
+) -> None:
+    schema = dict(snapshot.get("field_schema") or {})
+    ownership = {field["name"]: field["kind"] for field in FIELD_OWNERSHIP}
+    for name, expected_kind in ownership.items():
+        descriptor = schema.get(name)
+        if not isinstance(descriptor, Mapping):
+            conflicts.append(MirrorConflict(
+                "unknown_project_field",
+                "A Cortex-owned field is absent from the current GitHub Project schema.",
+                {"field": name},
+            ))
+            continue
+        observed_kind = descriptor.get("kind")
+        if observed_kind != expected_kind:
+            conflicts.append(MirrorConflict(
+                "project_field_type_mismatch",
+                "A Cortex-owned field has a different type in the current GitHub Project.",
+                {"field": name, "expected": expected_kind, "observed": observed_kind},
+            ))
+            continue
+        if expected_kind != "single_select" or desired.get(name) is None:
+            continue
+        options = dict(descriptor.get("options") or {})
+        if desired[name] not in options:
+            conflicts.append(MirrorConflict(
+                "unknown_select_option",
+                "A required Cortex value is absent from the current GitHub single-select field.",
+                {"field": name, "option": desired[name]},
+            ))
+
+
+def _snapshot_digest(snapshot: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        snapshot,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _plan_fingerprint(
+    *,
+    task_id: str,
+    project_id: str | None,
+    issue_id: str | None,
+    item_id: str | None,
+    snapshot_digest: str,
+    actions: tuple[MirrorAction, ...],
+    conflicts: tuple[MirrorConflict, ...],
+) -> str:
+    payload = {
+        "version": MIRROR_VERSION,
+        "task_id": task_id,
+        "project_id": project_id,
+        "issue_id": issue_id,
+        "project_item_id": item_id,
+        "snapshot_digest": snapshot_digest,
+        "actions": [asdict(action) for action in actions],
+        "conflicts": [asdict(conflict) for conflict in conflicts],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"plan-v{MIRROR_VERSION}:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
 
 
 def _value(mapping: Mapping[str, Any], key: str, default: Any = None) -> Any:
@@ -358,6 +479,11 @@ def _equal(field: str, left: Any, right: Any) -> bool:
         except (TypeError, ValueError):
             return False
     return left == right
+
+
+def field_values_equal(field: str, left: Any, right: Any) -> bool:
+    """Public normalization boundary shared by the planner and live verifier."""
+    return _equal(field, left, right)
 
 
 def _sync_state(fields: Mapping[str, Any]) -> str:

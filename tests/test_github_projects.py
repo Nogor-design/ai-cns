@@ -42,6 +42,35 @@ def project_item(*, item_id="PVTI_item_1", content_id="I_issue_1", fields=None):
     return {"id": item_id, "content_id": content_id, "fields": fields or {}}
 
 
+def field_schema():
+    options = {
+        "Status": {value: f"status-{index}" for index, value in enumerate(
+            ("Todo", "In progress", "Review", "Blocked", "Done"), start=1
+        )},
+        "Priority": {f"P{index}": f"priority-{index}" for index in range(1, 6)},
+        "Risk": {value: f"risk-{index}" for index, value in enumerate(
+            ("Auto", "Low", "Medium", "High"), start=1
+        )},
+    }
+    return {
+        field["name"]: {
+            "id": f"field-{index}",
+            "kind": field["kind"],
+            "options": options.get(field["name"], {}),
+        }
+        for index, field in enumerate(github_projects.FIELD_OWNERSHIP, start=1)
+    }
+
+
+def strict_snapshot(*items):
+    value = snapshot(*items)
+    value["field_schema_complete"] = True
+    value["field_schema"] = field_schema()
+    for item in value["items"]:
+        item["fields_complete"] = True
+    return value
+
+
 def apply_plan(task_record, project_snapshot, plan):
     next_task = deepcopy(task_record)
     next_snapshot = deepcopy(project_snapshot)
@@ -99,6 +128,60 @@ def test_incomplete_paginated_read_never_proposes_an_add():
     assert plan.safe_to_apply is False
     assert plan.actions == ()
     assert plan.conflicts[0].code == "incomplete_project_snapshot"
+
+
+def test_strict_plan_requires_complete_field_schema_and_item_values():
+    project_snapshot = snapshot(project_item())
+    plan = github_projects.build_mirror_plan(
+        task(), project_snapshot, require_schema=True
+    )
+    assert plan.safe_to_apply is False
+    assert plan.actions == ()
+    assert plan.conflicts[0].code == "incomplete_project_field_schema"
+
+    project_snapshot["field_schema_complete"] = True
+    project_snapshot["field_schema"] = field_schema()
+    plan = github_projects.build_mirror_plan(
+        task(), project_snapshot, require_schema=True
+    )
+    assert plan.safe_to_apply is False
+    assert plan.actions == ()
+    assert plan.conflicts[0].code == "incomplete_item_fields"
+
+
+def test_strict_plan_refuses_missing_fields_and_select_options():
+    project_snapshot = strict_snapshot(project_item())
+    project_snapshot["field_schema"].pop("Worker")
+    plan = github_projects.build_mirror_plan(
+        task(), project_snapshot, require_schema=True
+    )
+    assert any(conflict.code == "unknown_project_field" for conflict in plan.conflicts)
+    assert plan.actions == ()
+
+    project_snapshot = strict_snapshot(project_item())
+    project_snapshot["field_schema"]["Status"]["options"].pop("In progress")
+    plan = github_projects.build_mirror_plan(
+        task(), project_snapshot, require_schema=True
+    )
+    assert any(conflict.code == "unknown_select_option" for conflict in plan.conflicts)
+    assert plan.actions == ()
+
+
+def test_plan_fingerprint_binds_snapshot_identity_and_actions():
+    add_plan = github_projects.build_mirror_plan(task(), strict_snapshot(), require_schema=True)
+    update_snapshot = strict_snapshot(project_item(fields={"Status": "Todo"}))
+    update_plan = github_projects.build_mirror_plan(
+        task(), update_snapshot, require_schema=True
+    )
+    assert add_plan.fingerprint != update_plan.fingerprint
+    assert add_plan.snapshot_digest != update_plan.snapshot_digest
+
+    changed_snapshot = deepcopy(update_snapshot)
+    changed_snapshot["field_schema"]["Worker"]["id"] = "field-worker-replaced"
+    changed_plan = github_projects.build_mirror_plan(
+        task(), changed_snapshot, require_schema=True
+    )
+    assert changed_plan.fingerprint != update_plan.fingerprint
 
 
 def test_duplicate_issue_items_are_reported_and_never_mutated():

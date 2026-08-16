@@ -26,6 +26,8 @@ from . import (
     db,
     dispatcher,
     git_monitor,
+    github_adapter,
+    github_reader,
     health,
     ids,
     pm as pm_mod,
@@ -49,10 +51,15 @@ task_app = typer.Typer(help="Manage tasks.", no_args_is_help=True)
 project_app = typer.Typer(help="Manage projects.", no_args_is_help=True)
 pm_session_app = typer.Typer(help="Track durable PM sessions and attribution.", no_args_is_help=True)
 activity_app = typer.Typer(help="Inspect append-only portfolio activity.", no_args_is_help=True)
+github_app = typer.Typer(
+    help="Inventory, dry-run, and explicitly apply the GitHub Project mirror.",
+    no_args_is_help=True,
+)
 app.add_typer(task_app, name="task")
 app.add_typer(project_app, name="project")
 app.add_typer(pm_session_app, name="pm")
 app.add_typer(activity_app, name="activity")
+app.add_typer(github_app, name="github")
 
 
 def _configure_console_encoding() -> None:
@@ -969,6 +976,255 @@ def activity_list(
             f"{event['occurred_at']}  {event['actor_name'] or event['actor_type']:<12} "
             f"{event['action']:<24} {event['summary']}"
         )
+
+
+# ----------------------------------------------------------- GitHub mirror ---
+def _github_target(project: sqlite3.Row) -> tuple[str, int]:
+    owner = project["github_project_owner"]
+    number = project["github_project_number"]
+    if not owner or number is None:
+        _err(
+            "GitHub Project is not configured; run `cortex github configure "
+            f"{project['id']} --owner <login> --number <number>`"
+        )
+    return str(owner), int(number)
+
+
+@github_app.command("configure")
+def github_configure(
+    project: str = typer.Argument(..., help="Cortex project id or name."),
+    owner: str = typer.Option(..., "--owner", help="GitHub user or organization login."),
+    number: int = typer.Option(..., "--number", min=1, help="GitHub Project number."),
+    actor: str = typer.Option("owner", "--actor"),
+):
+    """Verify and save the exact GitHub Project target for one Cortex project."""
+    conn = _conn()
+    try:
+        project_row = store.get_project(conn, project)
+        snapshot = github_reader.read_project(owner, number)
+        if snapshot.get("project_closed"):
+            raise ValueError("configured GitHub Project is closed")
+        store.update_project(
+            conn,
+            project_row["id"],
+            github_project_owner=owner,
+            github_project_number=number,
+            github_project_id=snapshot["project_id"],
+        )
+        store.create_activity_event(
+            conn,
+            project_id=project_row["id"],
+            actor_type="human" if actor == "owner" else "agent",
+            actor_name=actor,
+            action="github.mirror_configured",
+            summary=(
+                f"Configured GitHub Project {owner} #{number} "
+                f"({snapshot.get('project_title')})"
+            ),
+            source="github-mirror",
+            source_ref=snapshot["project_id"],
+            evidence={
+                "owner": owner,
+                "number": number,
+                "project_id": snapshot["project_id"],
+            },
+        )
+    except (store.NotFound, ValueError, github_reader.GitHubProjectError) as exc:
+        _err(str(exc))
+    typer.secho(
+        f"configured {project_row['id']} -> {owner} Project #{number} "
+        f"({snapshot['project_id']})",
+        fg=typer.colors.GREEN,
+    )
+
+
+@github_app.command("inventory")
+def github_inventory(
+    project: str = typer.Argument(..., help="Cortex project id or name."),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """Read the complete configured Project without writing local or remote state."""
+    conn = _conn()
+    try:
+        project_row = store.get_project(conn, project)
+        owner, number = _github_target(project_row)
+        snapshot = github_reader.read_project(owner, number)
+        if project_row["github_project_id"] != snapshot["project_id"]:
+            raise ValueError("configured GitHub Project node ID changed")
+    except (store.NotFound, ValueError, github_reader.GitHubProjectError) as exc:
+        _err(str(exc))
+    if as_json:
+        typer.echo(json.dumps(snapshot, indent=2, sort_keys=True))
+        return
+    typer.echo(
+        f"{snapshot['project_title']} ({snapshot['project_id']}): "
+        f"{len(snapshot['items'])} items, {len(snapshot['field_schema'])} fields"
+    )
+    typer.echo("items_complete: true; field_schema_complete: true")
+
+
+@github_app.command("link")
+def github_link(
+    task_id: str = typer.Argument(..., help="Cortex task to link."),
+    issue_url: str = typer.Argument(..., help="Exact existing GitHub issue URL."),
+    actor: str = typer.Option("owner", "--actor"),
+):
+    """Resolve and store one existing issue's stable ID; never create an issue."""
+    conn = _conn()
+    try:
+        task = store.get_task(conn, task_id)
+        project = store.get_project(conn, task["project_id"])
+        if task["github_issue_id"]:
+            raise ValueError("task already has a stable GitHub issue link")
+        if not project["github_owner"] or not project["github_repo"]:
+            raise ValueError(
+                "project repository identity is not configured; use `project update "
+                f"{project['id']} --github-owner <owner> --github-repo <repo>`"
+            )
+        issue = github_reader.read_issue(issue_url)
+        expected_repo = f"{project['github_owner']}/{project['github_repo']}"
+        if str(issue.get("repository") or "").lower() != expected_repo.lower():
+            raise ValueError(
+                f"issue belongs to {issue.get('repository')}, expected {expected_repo}"
+            )
+        store.update_task(
+            conn,
+            task_id,
+            github_issue_id=issue["id"],
+            github_issue_number=issue["number"],
+            github_issue_url=issue["url"],
+            actor_type="human" if actor == "owner" else "agent",
+            actor_name=actor,
+            source="github-mirror",
+            commit=False,
+        )
+        store.create_activity_event(
+            conn,
+            project_id=task["project_id"],
+            task_id=task_id,
+            actor_type="human" if actor == "owner" else "agent",
+            actor_name=actor,
+            action="github.issue_linked",
+            summary=f"Linked existing GitHub issue #{issue['number']}",
+            source="github-mirror",
+            source_ref=issue["id"],
+            session_id=task["pm_session_id"],
+            evidence={
+                "issue_id": issue["id"],
+                "issue_number": issue["number"],
+                "issue_url": issue["url"],
+                "repository": issue["repository"],
+            },
+            commit=False,
+        )
+        conn.commit()
+    except (store.NotFound, ValueError, github_reader.GitHubProjectError) as exc:
+        conn.rollback()
+        _err(str(exc))
+    typer.secho(
+        f"linked {task_id} -> {issue['repository']}#{issue['number']} ({issue['id']})",
+        fg=typer.colors.GREEN,
+    )
+
+
+@github_app.command("plan")
+def github_plan(
+    task_id: str = typer.Argument(..., help="Exactly one linked Cortex task."),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """Print a strict dry-run plan without changing portfolio or GitHub records."""
+    conn = _conn()
+    try:
+        task = store.get_task(conn, task_id)
+        project = store.get_project(conn, task["project_id"])
+        owner, number = _github_target(project)
+        plan, snapshot = github_adapter.prepare(task, owner, number)
+        if project["github_project_id"] != snapshot["project_id"]:
+            raise ValueError("configured GitHub Project node ID changed")
+    except (
+        store.NotFound, ValueError, github_reader.GitHubProjectError,
+        github_adapter.MirrorApplyError,
+    ) as exc:
+        _err(str(exc))
+    payload = plan.as_dict()
+    payload["operation_id"] = github_adapter.suggested_operation_id(plan.fingerprint)
+    payload["target"] = {"owner": owner, "number": number}
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    typer.echo(f"task:        {task_id}")
+    typer.echo(f"target:      {owner} Project #{number} ({plan.project_id})")
+    typer.echo(f"issue:       {plan.issue_id or '-'}")
+    typer.echo(f"item:        {plan.project_item_id or '-'}")
+    typer.echo(f"safe:        {'yes' if plan.safe_to_apply else 'no'}")
+    typer.echo(f"fingerprint: {plan.fingerprint}")
+    typer.echo(f"operation:   {payload['operation_id']}")
+    for action in plan.actions:
+        typer.echo(
+            f"  {action.kind:<25} {action.field or action.target_id} "
+            f"{json.dumps(action.value, sort_keys=True)}"
+        )
+    for conflict in plan.conflicts:
+        typer.echo(f"  CONFLICT {conflict.code}: {conflict.summary}")
+    if plan.safe_to_apply and plan.actions:
+        typer.echo("\nApply only this exact re-read plan:")
+        typer.echo(
+            f"cortex github apply {task_id} --approve {plan.fingerprint} "
+            f"--operation-id {payload['operation_id']}"
+        )
+    elif not plan.actions and plan.safe_to_apply:
+        typer.secho("already converged; no apply is needed", fg=typer.colors.GREEN)
+
+
+@github_app.command("apply")
+def github_apply(
+    task_id: str = typer.Argument(..., help="Exactly one linked Cortex task."),
+    approved_fingerprint: str = typer.Option(
+        ..., "--approve", help="Exact fingerprint printed by `github plan`."
+    ),
+    operation_id: str = typer.Option(
+        ..., "--operation-id", help="Exact operation id printed by `github plan`."
+    ),
+    actor: str = typer.Option("codex", "--actor"),
+):
+    """Apply or resume one explicitly approved plan; never bulk or schedule work."""
+    conn = _conn()
+    try:
+        task = store.get_task(conn, task_id)
+        project = store.get_project(conn, task["project_id"])
+        owner, number = _github_target(project)
+        result = github_adapter.apply(
+            conn,
+            task_id,
+            owner,
+            number,
+            approved_fingerprint=approved_fingerprint,
+            operation_id=operation_id,
+            actor=actor,
+        )
+    except (
+        store.NotFound, ValueError, github_reader.GitHubProjectError,
+        github_adapter.MirrorApplyError,
+    ) as exc:
+        _err(str(exc))
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+@github_app.command("operation")
+def github_operation(
+    operation_id: str = typer.Argument(..., help="Durable mirror operation id."),
+):
+    """Inspect replay, recovery, and verification evidence for one operation."""
+    conn = _conn()
+    try:
+        row = store.get_github_mirror_operation(conn, operation_id)
+    except store.NotFound as exc:
+        _err(str(exc))
+    payload = {key: row[key] for key in row.keys()}
+    for key in ("actions_json", "completed_actions_json", "evidence_json"):
+        if payload.get(key):
+            payload[key.removesuffix("_json")] = json.loads(payload.pop(key))
+    typer.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @pm_session_app.command("start")

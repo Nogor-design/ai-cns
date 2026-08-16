@@ -29,12 +29,14 @@ from . import (
 
 WORKER_NAMES = ("codex", "claude", "gemini", "grok", "ollama", "perplexity")
 ACTIVE_TASK_STATUSES = {"open", "assigned", "in_progress", "running", "review", "blocked"}
+# Stable GitHub node IDs and ``sync_state`` are verified adapter evidence. They
+# are intentionally absent here so a dashboard form cannot forge concurrency
+# history or suppress the mirror planner's conflict detection.
 TASK_MUTABLE_FIELDS = {
     "title", "type", "status", "brief", "risk", "complexity", "acceptance",
     "allowed_paths", "budget", "priority", "assignee", "requested_model", "effort", "due_at",
     "parent_id", "milestone", "start_at", "target_at", "progress",
-    "blocked_reason", "next_action", "github_issue_id", "github_issue_number",
-    "github_issue_url", "github_project_item_id", "codex_thread_id", "sync_state",
+    "blocked_reason", "next_action", "github_issue_url", "codex_thread_id",
 }
 PROJECT_MUTABLE_FIELDS = {
     "status", "program", "priority", "privacy", "state_mode", "current_goal",

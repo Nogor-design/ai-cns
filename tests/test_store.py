@@ -248,3 +248,68 @@ def test_github_node_ids_can_only_link_to_one_cortex_task(conn, project):
 
     store.update_task(conn, first, github_issue_id="I_same_issue")
     assert store.get_task(conn, first)["github_issue_id"] == "I_same_issue"
+
+
+def test_github_mirror_operation_claim_is_durable_and_prevents_replay(conn, project):
+    task_id = store.create_task(
+        conn, project_id=project["id"], title="Mirror guarded task",
+        github_issue_id="I_guarded",
+    )
+    first, created = store.claim_github_mirror_operation(
+        conn,
+        operation_id="ghm-operation-1",
+        task_id=task_id,
+        project_id=project["id"],
+        plan_fingerprint="plan-v1:first",
+        github_project_id="PVT_1",
+        github_issue_id="I_guarded",
+        github_project_item_id="PVTI_1",
+        actor="codex",
+        session_id="pm-session",
+        actions=[{"kind": "set_project_field", "field": "Status"}],
+    )
+    assert created is True
+    assert first["status"] == "applying"
+
+    replay, created = store.claim_github_mirror_operation(
+        conn,
+        operation_id="ghm-operation-2",
+        task_id=task_id,
+        project_id=project["id"],
+        plan_fingerprint="plan-v1:first",
+        github_project_id="PVT_1",
+        github_issue_id="I_guarded",
+        github_project_item_id="PVTI_1",
+        actor="codex",
+        session_id="pm-session",
+        actions=[],
+    )
+    assert created is False
+    assert replay["operation_id"] == "ghm-operation-1"
+
+    with pytest.raises(ValueError, match="recoverable mirror operation"):
+        store.claim_github_mirror_operation(
+            conn,
+            operation_id="ghm-operation-3",
+            task_id=task_id,
+            project_id=project["id"],
+            plan_fingerprint="plan-v1:different",
+            github_project_id="PVT_1",
+            github_issue_id="I_guarded",
+            github_project_item_id="PVTI_1",
+            actor="codex",
+            session_id="pm-session",
+            actions=[],
+        )
+
+    store.update_github_mirror_operation(
+        conn,
+        "ghm-operation-1",
+        status="verified",
+        completed_actions=[{"index": 0}],
+        evidence={"verified": True},
+    )
+    completed = store.get_github_mirror_operation(conn, "ghm-operation-1")
+    assert completed["status"] == "verified"
+    assert json.loads(completed["completed_actions_json"]) == [{"index": 0}]
+    assert json.loads(completed["evidence_json"]) == {"verified": True}

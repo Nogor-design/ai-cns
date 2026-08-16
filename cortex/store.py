@@ -25,6 +25,9 @@ TASK_STATUSES = {
 STATE_MODES = {"tracked", "deferred"}
 SUGGESTION_STATUSES = {"proposed", "converted", "dismissed"}
 DEPENDENCY_TYPES = {"blocks"}
+GITHUB_MIRROR_OPERATION_STATUSES = {
+    "applying", "interrupted", "verified", "refused", "failed",
+}
 
 
 class NotFound(LookupError):
@@ -109,6 +112,132 @@ def list_activity_events(
             LIMIT ?""",
         params,
     ).fetchall()
+
+
+# --------------------------------------------------- GitHub mirror operations ---
+def get_github_mirror_operation(
+    conn: sqlite3.Connection, operation_id: str
+) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT * FROM github_mirror_operations WHERE operation_id = ?",
+        (operation_id,),
+    ).fetchone()
+    if row is None:
+        raise NotFound(f"GitHub mirror operation not found: {operation_id}")
+    return row
+
+
+def claim_github_mirror_operation(
+    conn: sqlite3.Connection,
+    *,
+    operation_id: str,
+    task_id: str,
+    project_id: str,
+    plan_fingerprint: str,
+    github_project_id: str,
+    github_issue_id: str | None,
+    github_project_item_id: str | None,
+    actor: str,
+    session_id: str | None,
+    actions: Any,
+) -> tuple[sqlite3.Row, bool]:
+    """Durably reserve one exact plan before the first remote mutation.
+
+    The task/fingerprint uniqueness constraint prevents replay under a new
+    operation id. Returning the existing row makes verified retries idempotent
+    and gives interrupted operations a stable recovery key.
+    """
+    existing = conn.execute(
+        """SELECT * FROM github_mirror_operations
+           WHERE operation_id = ? OR (task_id = ? AND plan_fingerprint = ?)
+           ORDER BY operation_id = ? DESC LIMIT 1""",
+        (operation_id, task_id, plan_fingerprint, operation_id),
+    ).fetchone()
+    if existing is not None:
+        if (
+            existing["task_id"] != task_id
+            or existing["plan_fingerprint"] != plan_fingerprint
+        ):
+            raise ValueError("operation id is already bound to a different mirror plan")
+        return existing, False
+    active = conn.execute(
+        """SELECT operation_id FROM github_mirror_operations
+           WHERE task_id = ? AND status IN ('applying', 'interrupted')
+           LIMIT 1""",
+        (task_id,),
+    ).fetchone()
+    if active is not None:
+        raise ValueError(
+            f"task already has recoverable mirror operation {active['operation_id']}"
+        )
+    ts = ids.now()
+    conn.execute(
+        """INSERT INTO github_mirror_operations
+           (operation_id, task_id, project_id, plan_fingerprint,
+            github_project_id, github_issue_id, github_project_item_id,
+            status, actor, session_id, actions_json, completed_actions_json,
+            created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            operation_id, task_id, project_id, plan_fingerprint,
+            github_project_id, github_issue_id, github_project_item_id,
+            "applying", actor, session_id, _json(actions) or "[]", "[]", ts, ts,
+        ),
+    )
+    _insert_activity(
+        conn,
+        project_id=project_id,
+        task_id=task_id,
+        actor_type="agent" if actor != "owner" else "human",
+        actor_name=actor,
+        action="github.mirror_apply_started",
+        summary=f"Started approved GitHub mirror operation {operation_id}",
+        source="github-mirror",
+        source_ref=operation_id,
+        session_id=session_id,
+        evidence={"plan_fingerprint": plan_fingerprint, "actions": actions},
+    )
+    conn.commit()
+    return get_github_mirror_operation(conn, operation_id), True
+
+
+def update_github_mirror_operation(
+    conn: sqlite3.Connection,
+    operation_id: str,
+    *,
+    status: str | None = None,
+    completed_actions: Any = None,
+    github_project_item_id: str | None = None,
+    evidence: Any = None,
+    error: str | None = None,
+    commit: bool = True,
+) -> None:
+    get_github_mirror_operation(conn, operation_id)
+    fields: dict[str, Any] = {}
+    if status is not None:
+        if status not in GITHUB_MIRROR_OPERATION_STATUSES:
+            raise ValueError(f"invalid GitHub mirror operation status: {status}")
+        fields["status"] = status
+        if status in {"verified", "refused", "failed"}:
+            fields["completed_at"] = ids.now()
+    if completed_actions is not None:
+        fields["completed_actions_json"] = _json(completed_actions) or "[]"
+    if github_project_item_id is not None:
+        fields["github_project_item_id"] = github_project_item_id
+    if evidence is not None:
+        fields["evidence_json"] = _json(evidence)
+    if error is not None:
+        fields["error"] = error
+    if not fields:
+        return
+    fields["updated_at"] = ids.now()
+    cols = ", ".join(f"{key} = ?" for key in fields)
+    conn.execute(
+        f"UPDATE github_mirror_operations SET {cols} WHERE operation_id = ?",
+        (*fields.values(), operation_id),
+    )
+    if commit:
+        conn.commit()
 
 
 def _parent_would_cycle(

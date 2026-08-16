@@ -159,6 +159,44 @@ def test_project_allowlist_can_be_updated_over_http(
     assert project["allowlist_configured"] is True
 
 
+def test_adapter_owned_github_evidence_cannot_be_forged_over_http(
+    dashboard_server, isolated_db, tmp_path
+):
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Mirror Guard", repo_path=str(tmp_path)
+        )
+        task_id = store.create_task(
+            conn,
+            project_id=project_id,
+            title="Guard adapter evidence",
+            github_issue_id="I_original",
+            github_issue_number=7,
+            github_project_item_id="PVTI_original",
+            sync_state='{"fields":{},"fingerprint":"v1:original"}',
+        )
+
+    status, payload = request_json(
+        dashboard_server,
+        f"/api/tasks/{task_id}",
+        method="PATCH",
+        body={
+            "title": "Allowed title edit",
+            "github_issue_id": "I_forged",
+            "github_issue_number": 99,
+            "github_project_item_id": "PVTI_forged",
+            "sync_state": '{"fields":{},"fingerprint":"v1:forged"}',
+        },
+    )
+
+    assert status == 200
+    assert payload["task"]["title"] == "Allowed title edit"
+    assert payload["task"]["github_issue_id"] == "I_original"
+    assert payload["task"]["github_issue_number"] == 7
+    assert payload["task"]["github_project_item_id"] == "PVTI_original"
+    assert payload["task"]["sync_state"] == '{"fields":{},"fingerprint":"v1:original"}'
+
+
 def test_activity_endpoint_filters_by_project_task_and_session(
     dashboard_server, isolated_db, tmp_path
 ):

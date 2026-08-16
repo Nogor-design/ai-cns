@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS projects (
     remote_url      TEXT,
     github_owner    TEXT,
     github_repo     TEXT,
+    github_project_owner TEXT,
+    github_project_number INTEGER,
+    github_project_id TEXT,
     codex_project_id TEXT,
     updated_at    TEXT NOT NULL
 );
@@ -145,6 +148,27 @@ CREATE TABLE IF NOT EXISTS activity_events (
     evidence_json TEXT
 );
 
+CREATE TABLE IF NOT EXISTS github_mirror_operations (
+    operation_id     TEXT PRIMARY KEY,
+    task_id          TEXT NOT NULL REFERENCES tasks(id),
+    project_id       TEXT NOT NULL REFERENCES projects(id),
+    plan_fingerprint TEXT NOT NULL,
+    github_project_id TEXT NOT NULL,
+    github_issue_id  TEXT,
+    github_project_item_id TEXT,
+    status           TEXT NOT NULL, -- applying | interrupted | verified | refused | failed
+    actor             TEXT NOT NULL,
+    session_id        TEXT,
+    actions_json      TEXT NOT NULL,
+    completed_actions_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json     TEXT,
+    error             TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    completed_at      TEXT,
+    UNIQUE(task_id, plan_fingerprint)
+);
+
 CREATE TABLE IF NOT EXISTS suggestions (
     id                 TEXT PRIMARY KEY,
     project_id         TEXT NOT NULL REFERENCES projects(id),
@@ -217,6 +241,10 @@ CREATE INDEX IF NOT EXISTS idx_dependencies_task ON task_dependencies(task_id);
 CREATE INDEX IF NOT EXISTS idx_dependencies_upstream ON task_dependencies(depends_on_task_id);
 CREATE INDEX IF NOT EXISTS idx_activity_project_time ON activity_events(project_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_task_time ON activity_events(task_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_github_mirror_task_time
+    ON github_mirror_operations(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_github_mirror_status
+    ON github_mirror_operations(status);
 CREATE INDEX IF NOT EXISTS idx_suggestions_project ON suggestions(project_id);
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
 
@@ -250,6 +278,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "remote_url": "TEXT",
         "github_owner": "TEXT",
         "github_repo": "TEXT",
+        "github_project_owner": "TEXT",
+        "github_project_number": "INTEGER",
+        "github_project_id": "TEXT",
         "codex_project_id": "TEXT",
     },
     "tasks": {

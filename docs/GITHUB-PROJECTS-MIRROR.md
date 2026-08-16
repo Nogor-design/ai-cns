@@ -93,11 +93,20 @@ no network, subprocess, database, or GitHub mutation. The normalized snapshot is
 ```json
 {
   "project_id": "PVT_project_node_id",
+  "field_schema_complete": true,
+  "field_schema": {
+    "Status": {
+      "id": "PVTSSF_status_field",
+      "kind": "single_select",
+      "options": {"Todo": "option_todo", "Done": "option_done"}
+    }
+  },
   "items_complete": true,
   "items": [
     {
       "id": "PVTI_item_node_id",
       "content_id": "I_issue_node_id",
+      "fields_complete": true,
       "fields": {"Cortex ID": "task-id", "Status": "Todo"}
     }
   ]
@@ -107,17 +116,74 @@ no network, subprocess, database, or GitHub mutation. The normalized snapshot is
 `items_complete` is mandatory. The live reader must follow every ProjectV2 item
 page and set it to true only when the final page reports no next page. An absent,
 false, interrupted, or rate-limited read can never propose `add_project_item`.
+The guarded adapter also requires `field_schema_complete` and
+`fields_complete` for the linked item. It follows Project field pages and each
+item's field-value pages, binds exact field and select-option node IDs into the
+approved operation, and refuses missing, renamed, or type-changed fields before
+the first write.
 The normalizer must represent cleared text/date values as `null`, numbers as JSON
 numbers, and dates as `YYYY-MM-DD`; the planner also treats empty optional text
 and numeric strings defensively to avoid false update loops.
 
 Plans contain only logical actions (`add_project_item`, `set_project_field`,
 `clear_project_field`, `update_cortex_link`, or `update_cortex_sync_state`) and
-explicit conflicts. A future adapter must resolve field and single-select option
+explicit conflicts. The guarded adapter resolves field and single-select option
 IDs from the current Project before translating actions to GraphQL.
 `update_cortex_sync_state` must run last, after a re-read verifies every remote
 value and optimistic precondition. `safe_to_apply` is false whenever any conflict
 exists.
+
+## Guarded operator adapter
+
+The live adapter is opt-in and one-task-only:
+
+```powershell
+.\scripts\cortex-portfolio.ps1 github configure cortex-portfolio-control-plane `
+  --owner Nogor-design --number 1
+.\scripts\cortex-portfolio.ps1 github inventory cortex-portfolio-control-plane
+.\scripts\cortex-portfolio.ps1 github link <task-id> `
+  https://github.com/<owner>/<repo>/issues/<number>
+.\scripts\cortex-portfolio.ps1 github plan <task-id>
+```
+
+Configuration verifies and stores the Project owner, number, and stable node
+ID. `github link` resolves one explicit existing issue URL, verifies its
+repository against the Cortex project, and stores its stable node ID; it never
+creates or edits the issue. Inventory and plan are read-only and create no
+operation or task write. A
+strict plan fingerprint covers the target Project, issue, item, complete
+snapshot digest, ordered actions, conflicts, and mirror version; it is separate
+from `Cortex Sync`, which fingerprints only desired field values.
+
+Apply requires the exact fingerprint and deterministic operation ID printed by
+the fresh plan:
+
+```powershell
+.\scripts\cortex-portfolio.ps1 github apply <task-id> `
+  --approve <plan-fingerprint> `
+  --operation-id <operation-id>
+```
+
+Before the first remote mutation, Cortex durably reserves the operation and
+refuses concurrent or replayed plans for that task. Each mutation re-reads the
+complete Project, verifies its bound field/option IDs and expected value, writes
+one field, and re-reads the result. `Cortex Sync` is written remotely last. Only
+after all desired fields verify does one SQLite transaction persist the stable
+Project-item link, local sync state, completed operation, and attributed
+activity.
+
+If a request is interrupted after GitHub accepted it, Cortex leaves the local
+sync evidence untouched and records the operation as `interrupted` with its
+completed-action evidence. Re-running the same approved command re-reads each
+action: an already-desired value is verified without a duplicate mutation, an
+expected old value is safely continued, and any third value is refused. Use
+`github operation <operation-id>` to inspect recovery evidence. A verified
+replay performs zero writes.
+
+The dashboard cannot edit `github_issue_id`, `github_issue_number`,
+`github_project_item_id`, or `sync_state`; those columns are adapter-owned
+verification evidence. No daemon, webhook, scheduled job, bulk mode, issue
+creation, title matching, or GitHub-owned issue-field mutation exists.
 
 ## Live one-item acceptance gate
 

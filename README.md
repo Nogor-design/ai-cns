@@ -160,6 +160,40 @@ The `.cmd` wrapper is equivalent:
 .\scripts\cortex-portfolio.cmd dashboard
 ```
 
+## Mirror approved work to GitHub Projects
+
+Cortex remains the portfolio source of truth. The GitHub Project is an
+engineering view of already-linked issues; Cortex never creates an issue,
+matches by title, bulk-syncs, or schedules this adapter.
+
+Configure and verify the target once, then use the read-only commands freely:
+
+```powershell
+.\scripts\cortex-portfolio.ps1 github configure cortex-portfolio-control-plane `
+  --owner Nogor-design --number 1
+.\scripts\cortex-portfolio.ps1 github inventory cortex-portfolio-control-plane
+.\scripts\cortex-portfolio.ps1 github link <task-id> `
+  https://github.com/<owner>/<repo>/issues/<number>
+.\scripts\cortex-portfolio.ps1 github plan <task-id>
+```
+
+`github plan` reads every Project, field, and item-field page and prints an
+immutable fingerprint plus a deterministic operation ID. It changes neither
+portfolio records nor GitHub. When a plan actually has actions, applying it
+requires both exact values printed by that fresh plan:
+
+```powershell
+.\scripts\cortex-portfolio.ps1 github apply <task-id> `
+  --approve <plan-fingerprint> `
+  --operation-id <operation-id>
+```
+
+Every field is checked immediately before its mutation, every result is
+re-read, and the local Project-item link and sync evidence commit atomically
+only after remote verification. Interrupted operations retain their exact
+operation ID and completed-action evidence; inspect one with
+`github operation <operation-id>` and resume it with the same approved command.
+
 To preview an optional daily scheduled task without installing anything:
 
 ```powershell

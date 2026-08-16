@@ -55,4 +55,24 @@ def test_v5_database_adds_unique_github_identity_indexes(isolated_db):
         }
         assert indexes["idx_tasks_github_issue_id"] == 1
         assert indexes["idx_tasks_github_project_item_id"] == 1
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+
+
+def test_v6_database_adds_github_mirror_configuration_and_operations(isolated_db):
+    with db.connect(isolated_db) as conn:
+        conn.execute("DROP TABLE github_mirror_operations")
+        conn.execute("PRAGMA user_version = 6")
+
+    key = str(isolated_db.resolve())
+    db._initialised.discard(key)
+    with db.connect(isolated_db) as conn:
+        project_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(projects)")
+        }
+        assert {
+            "github_project_owner", "github_project_number", "github_project_id"
+        } <= project_columns
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='github_mirror_operations'"
+        ).fetchone()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
