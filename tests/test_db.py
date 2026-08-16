@@ -55,7 +55,7 @@ def test_v5_database_adds_unique_github_identity_indexes(isolated_db):
         }
         assert indexes["idx_tasks_github_issue_id"] == 1
         assert indexes["idx_tasks_github_project_item_id"] == 1
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_v6_database_adds_github_mirror_configuration_and_operations(isolated_db):
@@ -75,4 +75,18 @@ def test_v6_database_adds_github_mirror_configuration_and_operations(isolated_db
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='github_mirror_operations'"
         ).fetchone()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+
+
+def test_v7_database_adds_project_removal_audit_table(isolated_db):
+    with db.connect(isolated_db) as conn:
+        conn.execute("DROP TABLE project_removals")
+        conn.execute("PRAGMA user_version = 7")
+
+    key = str(isolated_db.resolve())
+    db._initialised.discard(key)
+    with db.connect(isolated_db) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_removals'"
+        ).fetchone()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION

@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -233,6 +233,22 @@ CREATE TABLE IF NOT EXISTS project_git_checks (
     checked_at      TEXT NOT NULL
 );
 
+-- Project deletion is intentionally auditable even after all project-bound
+-- rows are gone. This tombstone has no foreign key back to projects so the
+-- portfolio timeline can still answer who removed what and when.
+CREATE TABLE IF NOT EXISTS project_removals (
+    removal_id         TEXT PRIMARY KEY,
+    project_id         TEXT NOT NULL,
+    project_name       TEXT NOT NULL,
+    repo_path          TEXT NOT NULL,
+    actor_type         TEXT NOT NULL DEFAULT 'human',
+    actor_name         TEXT,
+    source             TEXT NOT NULL DEFAULT 'dashboard',
+    removed_at         TEXT NOT NULL,
+    deleted_counts_json TEXT NOT NULL,
+    evidence_json      TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
@@ -247,6 +263,8 @@ CREATE INDEX IF NOT EXISTS idx_github_mirror_status
     ON github_mirror_operations(status);
 CREATE INDEX IF NOT EXISTS idx_suggestions_project ON suggestions(project_id);
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
+CREATE INDEX IF NOT EXISTS idx_project_removals_time
+    ON project_removals(removed_at DESC);
 
 -- Model history for decision support: computed, never stored (spec section 4).
 -- Recreate it on connect so additive outcome semantics reach older databases.

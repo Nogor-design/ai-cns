@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, Bot, CalendarRange, Check, CheckCircle2, ChevronRight, CircleAlert,
   CirclePlay, Clock3, Copy, Cpu, FolderGit2, FolderPlus, GitBranch, Gauge, LayoutDashboard,
   Github, LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
-  Search, ShieldCheck, Sparkles, UsersRound, UserRound, WandSparkles, X,
+  Search, ShieldCheck, Sparkles, Trash2, UsersRound, UserRound, WandSparkles, X,
 } from 'lucide-react'
 import { filterAndGroupTimeline } from './timeline.js'
 import { mirrorActionLabel, mirrorStatusMeta } from './githubMirror.js'
 import RoadmapView from './RoadmapView.jsx'
 import AddProjectModal from './AddProjectModal.jsx'
+import RemoveProjectModal from './RemoveProjectModal.jsx'
 
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
@@ -268,7 +269,7 @@ function RunActivity({ runs, onView }) {
 function timelineStatus(item) {
   if (item.kind === 'activity') {
     if (item.action?.includes('blocked') || item.action === 'run.failed') return 'failed'
-    if (item.action?.includes('closed') || item.action?.includes('completed')) return 'completed'
+    if (item.action?.includes('closed') || item.action?.includes('completed') || item.action?.includes('removed')) return 'completed'
     if (item.action?.includes('started')) return 'running'
     if (item.action?.includes('status_changed')) return 'review'
     return 'queued'
@@ -409,7 +410,7 @@ function DrawerTask({ task, onTaskUpdate, onStart, onCodex, onGithub }) {
   </div>
 }
 
-function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist, onTimeline, onCodex, onGithub }) {
+function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist, onTimeline, onCodex, onGithub, onRemove }) {
   if (!project) return null
   return <aside className="drawer"><div className="drawer-head"><div><span className="project-monogram large" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span><span><small>{project.program}</small><h2>{project.name}</h2></span></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <div className="drawer-primary"><button onClick={() => onPlan(project.project_id, 'codex')}><Sparkles size={16} />Ask Codex to plan next</button><button onClick={() => onPlan(project.project_id, 'ollama')}><Cpu size={16} />Use local planner</button></div>
@@ -418,6 +419,7 @@ function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManu
     <WorkerAllowlist project={project} onChange={onAllowlist} />
     <section><div className="drawer-section-head"><label>Active work ({project.tasks.length})</label><button onClick={() => onManual(project.project_id)}><Plus size={13} />Manual</button></div><div className="drawer-task-list">{project.tasks.map(task => <DrawerTask key={task.id} task={task} onTaskUpdate={onTaskUpdate} onStart={onStart} onCodex={onCodex} onGithub={onGithub} />)}{!project.tasks.length && <div className="lane-empty">No active tasks.</div>}</div></section>
     <div className="drawer-path"><FolderGit2 size={14} /><span title={project.repo_path}>{project.repo_path}</span></div>
+    <button type="button" className="drawer-remove-project" onClick={() => onRemove(project)}><Trash2 size={13} />Remove from Cortex</button>
   </aside>
 }
 
@@ -486,7 +488,17 @@ export default function App() {
   const [codexLaunch, setCodexLaunch] = useState(null)
   const [githubLaunch, setGithubLaunch] = useState(null)
   const [showAddProject, setShowAddProject] = useState(false)
+  const [removalProject, setRemovalProject] = useState(null)
   const pollRef = useRef(null)
+
+  const previewProjectRemoval = useCallback(async projectId => {
+    const payload = await request(`/api/projects/${projectId}/removal-preview`, {
+      method: 'POST',
+      body: '{}',
+      headers: { 'X-Cortex-Action-Token': data?.action_token || '' },
+    })
+    return payload.preview
+  }, [data?.action_token])
 
   async function load(silent = false) { if (!silent) setError(''); try { const [portfolio, jobPayload] = await Promise.all([request('/api/portfolio'), request('/api/jobs')]); setData({ ...portfolio, jobs: jobPayload.jobs }) } catch (err) { setError(err.message) } }
   useEffect(() => { load(); return () => clearInterval(pollRef.current) }, [])
@@ -608,6 +620,19 @@ export default function App() {
     setToast(`${payload.project.name} added to Cortex`)
     return payload
   }
+  async function removeProject(projectId, confirmation) {
+    const projectName = projectMap[projectId]?.name || 'Project'
+    const payload = await request(`/api/projects/${projectId}`, {
+      method: 'DELETE',
+      body: JSON.stringify(confirmation),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    setSelectedId(null)
+    if (timelineProjectId === projectId) setTimelineProjectId(null)
+    await load(true)
+    setToast(`${projectName} removed from Cortex; repository left untouched`)
+    return payload
+  }
   async function updateAllowlist(projectId, allowed) { try { await request(`/api/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify({ allowed_workers: allowed }) }); setToast(`Allowlist updated: ${allowed.join(', ')}`); await load(true) } catch (err) { setError(err.message) } }
   async function dismissSuggestion(id) { try { await request(`/api/suggestions/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'dismissed' }) }); setToast('Suggestion dismissed'); await load(true) } catch (err) { setError(err.message) } }
   async function keepTeamWorking() { try { const payload = await request('/api/team/keep-working', { method: 'POST', body: JSON.stringify({ limit: 3 }) }); if (!payload.job_ids.length) { setToast('No safe approved assignments are waiting; ask the PM to plan a project'); await load(true); return } watchJob(payload.job_ids[0], 'Starting team') } catch (err) { setError(err.message) } }
@@ -670,12 +695,13 @@ export default function App() {
         </>}
         <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges or external actions</span></footer>
       </div>
-    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} onTimeline={openProjectTimeline} onCodex={previewCodex} onGithub={previewGithub} /></div>
+    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} onTimeline={openProjectTimeline} onCodex={previewCodex} onGithub={previewGithub} onRemove={setRemovalProject} /></div>
     {manualProject !== undefined && <ManualTaskModal projects={data.projects} initialProject={manualProject || ''} onClose={() => setManualProject(undefined)} onCreated={async () => { setManualProject(undefined); setToast('Manual task added'); await load(true) }} />}
     <RunModal run={selectedRun} onClose={() => setSelectedRun(null)} />
     <CodexLaunchModal launch={codexLaunch} onClose={() => setCodexLaunch(null)} onCopied={() => setToast('Bounded Codex prompt copied')} />
     <GitHubMirrorModal launch={githubLaunch} onClose={() => setGithubLaunch(null)} onCopied={kind => setToast(kind === 'resume' ? 'Recovery command copied; review before running' : 'Approved apply command copied; review before running')} />
     {showAddProject && <AddProjectModal onClose={() => setShowAddProject(false)} onPreview={previewProject} onRegister={registerProject} />}
+    {removalProject && <RemoveProjectModal project={removalProject} onClose={() => setRemovalProject(null)} onPreview={previewProjectRemoval} onRemove={removeProject} />}
     {toast && <div className="toast"><Check size={15} />{toast}</div>}
   </div>
 }

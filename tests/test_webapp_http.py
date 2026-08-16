@@ -214,6 +214,84 @@ def test_guided_project_preview_and_registration_require_local_action_token(
         assert event["source"] == "dashboard"
 
 
+def test_guarded_project_removal_preserves_repository_and_timeline_audit(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "remove-http"
+    repo.mkdir()
+    state_path = repo / ".cortex" / "state.md"
+    state_path.parent.mkdir()
+    state_path.write_text("# Preserve this state\n", encoding="utf-8")
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Remove HTTP", repo_path=str(repo), record_activity=True
+        )
+        store.create_task(conn, project_id=project_id, title="Old local task")
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+
+    with pytest.raises(HTTPError) as missing_token:
+        request_json(
+            dashboard_server,
+            f"/api/projects/{project_id}/removal-preview",
+            method="POST",
+            body={},
+        )
+    assert missing_token.value.code == 403
+
+    status, payload = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/removal-preview",
+        method="POST",
+        body={},
+        headers=headers,
+    )
+    assert status == 200
+    assert payload["preview"]["project_name"] == "Remove HTTP"
+    assert payload["preview"]["deleted_counts"]["tasks"] == 1
+    assert payload["preview"]["preserved"]["state_exists"] is True
+
+    with pytest.raises(HTTPError) as wrong_name:
+        request_json(
+            dashboard_server,
+            f"/api/projects/{project_id}",
+            method="DELETE",
+            body={"confirm_name": "remove http", "acknowledge_permanent": True},
+            headers=headers,
+        )
+    assert wrong_name.value.code == 400
+
+    status, removed = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}",
+        method="DELETE",
+        body={"confirm_name": "Remove HTTP", "acknowledge_permanent": True},
+        headers=headers,
+    )
+    assert status == 200
+    assert removed["removal"]["project_id"] == project_id
+    assert state_path.read_text(encoding="utf-8") == "# Preserve this state\n"
+    with db.connect(isolated_db) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM projects WHERE id = ?", (project_id,)
+        ).fetchone() is None
+        tombstone = conn.execute(
+            "SELECT * FROM project_removals WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        assert tombstone["actor_type"] == "human"
+        assert tombstone["actor_name"] == "owner"
+
+    _, refreshed = request_json(dashboard_server, "/api/portfolio")
+    assert not any(project["project_id"] == project_id for project in refreshed["projects"])
+    removal_event = next(
+        event for event in refreshed["activity"]
+        if event["action"] == "project.removed" and event["project_id"] == project_id
+    )
+    assert removal_event["actor_name"] == "owner"
+    assert removal_event["evidence"]["preserved"]["state_exists"] is True
+
+
 def test_dashboard_schedule_patch_is_attributed_to_the_human_owner(
     dashboard_server, isolated_db, tmp_path
 ):

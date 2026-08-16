@@ -104,6 +104,13 @@ metadata, lets you set privacy and allowed AI workers, and shows a final review
 before writing anything. Registration stays local, never overwrites an
 existing `.cortex/state.md`, and does not contact an AI provider or GitHub.
 
+To remove a project, open its detail drawer and choose **Remove from Cortex**.
+Cortex first counts the local tasks, runs, decisions, and activity that will be
+deleted, then requires the exact project name and a permanent-removal
+acknowledgement. The repository, `.cortex/state.md`, branches, GitHub resources,
+and Codex tasks remain untouched. A small audit tombstone stays in the
+portfolio timeline so the owner can still see who removed the project and when.
+
 Open **Roadmap** for the portfolio schedule. It uses one shared Gantt-style
 time axis while keeping three kinds of evidence explicit: planned bars come
 only from recorded start/target/due dates, completed bars show the observed

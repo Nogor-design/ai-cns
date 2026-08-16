@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
-    project_registration,
+    project_registration, project_removal,
     github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
 )
 
@@ -286,8 +286,14 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         roadmap_payloads.append(item)
 
     activity_payloads = [
-        _activity_dict(event) for event in store.list_activity_events(conn, limit=100)
+        _activity_dict(event)
+        for event in (
+            list(store.list_activity_events(conn, limit=100))
+            + list(project_removal.list_activity(conn, limit=100))
+        )
     ]
+    activity_payloads.sort(key=lambda event: event["occurred_at"], reverse=True)
+    activity_payloads = activity_payloads[:100]
 
     task_payloads: list[dict[str, Any]] = []
     project_task_index: dict[str, list[dict[str, Any]]] = {
@@ -671,6 +677,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     project = _row_dict(result.pop("project"))
                 self._json(HTTPStatus.CREATED, {"project": project, **result})
                 return
+            if (
+                len(parts) == 4
+                and parts[:2] == ["api", "projects"]
+                and parts[3] == "removal-preview"
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_removal.preview(conn, parts[2])
+                self._json(HTTPStatus.OK, {"preview": payload})
+                return
             if path == "/api/continue":
                 project_id = body.get("project_id")
                 with db.connect(self.server.database_path) as conn:
@@ -832,6 +849,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (
             KeyError, TypeError, ValueError, OSError, sqlite3.IntegrityError, store.NotFound,
             github_reader.GitHubProjectError, github_adapter.MirrorApplyError,
+        ) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path)
+        parts = [part for part in path.split("/") if part]
+        if len(parts) != 3 or parts[:2] != ["api", "projects"]:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "route not found"})
+            return
+        if not self._allow_local_action():
+            return
+        try:
+            body = self._body()
+            with db.connect(self.server.database_path) as conn:
+                payload = project_removal.remove(
+                    conn,
+                    parts[2],
+                    confirm_name=body.get("confirm_name"),
+                    acknowledge_permanent=body.get("acknowledge_permanent"),
+                    actor_type="human",
+                    actor_name="owner",
+                    source="dashboard",
+                )
+            self._json(HTTPStatus.OK, {"removal": payload})
+        except (
+            TypeError, ValueError, OSError, sqlite3.IntegrityError, store.NotFound,
         ) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
