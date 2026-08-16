@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 8
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -43,6 +43,13 @@ CREATE TABLE IF NOT EXISTS projects (
     -- JSON array of worker names permitted to see this repository. NULL means
     -- "not configured yet"; the policy layer supplies a privacy-based default.
     allowed_workers TEXT,
+    remote_url      TEXT,
+    github_owner    TEXT,
+    github_repo     TEXT,
+    github_project_owner TEXT,
+    github_project_number INTEGER,
+    github_project_id TEXT,
+    codex_project_id TEXT,
     updated_at    TEXT NOT NULL
 );
 
@@ -65,6 +72,21 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority       INTEGER NOT NULL DEFAULT 3,       -- 1 (highest) .. 5 (lowest)
     assignee       TEXT,                            -- explicit worker or human owner
     due_at         TEXT,                            -- optional ISO date/datetime
+    parent_id      TEXT REFERENCES tasks(id),
+    milestone      TEXT,
+    start_at       TEXT,
+    target_at      TEXT,
+    completed_at   TEXT,
+    progress       INTEGER NOT NULL DEFAULT 0,
+    blocked_reason TEXT,
+    next_action    TEXT,
+    github_issue_id TEXT,
+    github_issue_number INTEGER,
+    github_issue_url TEXT,
+    github_project_item_id TEXT,
+    codex_thread_id TEXT,
+    pm_session_id  TEXT,
+    sync_state     TEXT,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
@@ -100,6 +122,51 @@ CREATE TABLE IF NOT EXISTS decisions (
     decision    TEXT NOT NULL,
     rationale   TEXT,
     source      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_dependencies (
+    task_id            TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    depends_on_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    type               TEXT NOT NULL DEFAULT 'blocks',
+    created_at         TEXT NOT NULL,
+    PRIMARY KEY (task_id, depends_on_task_id)
+);
+
+CREATE TABLE IF NOT EXISTS activity_events (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    task_id     TEXT REFERENCES tasks(id),
+    actor_type  TEXT NOT NULL DEFAULT 'agent',
+    actor_name  TEXT,
+    model       TEXT,
+    action      TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'cortex',
+    source_ref  TEXT,
+    session_id  TEXT,
+    occurred_at TEXT NOT NULL,
+    evidence_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS github_mirror_operations (
+    operation_id     TEXT PRIMARY KEY,
+    task_id          TEXT NOT NULL REFERENCES tasks(id),
+    project_id       TEXT NOT NULL REFERENCES projects(id),
+    plan_fingerprint TEXT NOT NULL,
+    github_project_id TEXT NOT NULL,
+    github_issue_id  TEXT,
+    github_project_item_id TEXT,
+    status           TEXT NOT NULL, -- applying | interrupted | verified | refused | failed
+    actor             TEXT NOT NULL,
+    session_id        TEXT,
+    actions_json      TEXT NOT NULL,
+    completed_actions_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json     TEXT,
+    error             TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    completed_at      TEXT,
+    UNIQUE(task_id, plan_fingerprint)
 );
 
 CREATE TABLE IF NOT EXISTS suggestions (
@@ -166,12 +233,38 @@ CREATE TABLE IF NOT EXISTS project_git_checks (
     checked_at      TEXT NOT NULL
 );
 
+-- Project deletion is intentionally auditable even after all project-bound
+-- rows are gone. This tombstone has no foreign key back to projects so the
+-- portfolio timeline can still answer who removed what and when.
+CREATE TABLE IF NOT EXISTS project_removals (
+    removal_id         TEXT PRIMARY KEY,
+    project_id         TEXT NOT NULL,
+    project_name       TEXT NOT NULL,
+    repo_path          TEXT NOT NULL,
+    actor_type         TEXT NOT NULL DEFAULT 'human',
+    actor_name         TEXT,
+    source             TEXT NOT NULL DEFAULT 'dashboard',
+    removed_at         TEXT NOT NULL,
+    deleted_counts_json TEXT NOT NULL,
+    evidence_json      TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id);
+CREATE INDEX IF NOT EXISTS idx_dependencies_task ON task_dependencies(task_id);
+CREATE INDEX IF NOT EXISTS idx_dependencies_upstream ON task_dependencies(depends_on_task_id);
+CREATE INDEX IF NOT EXISTS idx_activity_project_time ON activity_events(project_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_task_time ON activity_events(task_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_github_mirror_task_time
+    ON github_mirror_operations(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_github_mirror_status
+    ON github_mirror_operations(status);
 CREATE INDEX IF NOT EXISTS idx_suggestions_project ON suggestions(project_id);
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
+CREATE INDEX IF NOT EXISTS idx_project_removals_time
+    ON project_removals(removed_at DESC);
 
 -- Model history for decision support: computed, never stored (spec section 4).
 -- Recreate it on connect so additive outcome semantics reach older databases.
@@ -200,6 +293,13 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "privacy": "TEXT NOT NULL DEFAULT 'internal'",
         "state_mode": "TEXT NOT NULL DEFAULT 'tracked'",
         "allowed_workers": "TEXT",
+        "remote_url": "TEXT",
+        "github_owner": "TEXT",
+        "github_repo": "TEXT",
+        "github_project_owner": "TEXT",
+        "github_project_number": "INTEGER",
+        "github_project_id": "TEXT",
+        "codex_project_id": "TEXT",
     },
     "tasks": {
         "risk": "TEXT NOT NULL DEFAULT 'auto'",
@@ -212,6 +312,21 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "due_at": "TEXT",
         "requested_model": "TEXT",
         "effort": "TEXT",
+        "parent_id": "TEXT REFERENCES tasks(id)",
+        "milestone": "TEXT",
+        "start_at": "TEXT",
+        "target_at": "TEXT",
+        "completed_at": "TEXT",
+        "progress": "INTEGER NOT NULL DEFAULT 0",
+        "blocked_reason": "TEXT",
+        "next_action": "TEXT",
+        "github_issue_id": "TEXT",
+        "github_issue_number": "INTEGER",
+        "github_issue_url": "TEXT",
+        "github_project_item_id": "TEXT",
+        "codex_thread_id": "TEXT",
+        "pm_session_id": "TEXT",
+        "sync_state": "TEXT",
     },
     "runs": {
         "workspace_path": "TEXT",
@@ -222,6 +337,9 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     "suggestions": {
         "effort": "TEXT",
+    },
+    "activity_events": {
+        "session_id": "TEXT",
     },
 }
 
@@ -237,6 +355,23 @@ def _apply_additive_migrations(conn: sqlite3.Connection) -> None:
                 conn.execute(
                     f'ALTER TABLE "{table}" ADD COLUMN "{name}" {declaration}'
                 )
+
+
+def _apply_identity_constraints(conn: sqlite3.Connection) -> None:
+    """Keep one Cortex task mapped to one stable GitHub identity.
+
+    These indexes run after additive migrations because older task tables do not
+    yet contain the GitHub columns when the main schema script is evaluated.
+    """
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_github_issue_id
+           ON tasks(github_issue_id) WHERE github_issue_id IS NOT NULL"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_github_project_item_id
+           ON tasks(github_project_item_id)
+           WHERE github_project_item_id IS NOT NULL"""
+    )
 
 
 class Connection(sqlite3.Connection):
@@ -266,6 +401,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         return
     conn.executescript(SCHEMA)
     _apply_additive_migrations(conn)
+    _apply_identity_constraints(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 

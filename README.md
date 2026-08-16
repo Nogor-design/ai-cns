@@ -7,6 +7,9 @@ and explainable task routing in one SQLite database.
 
 See `AI-CNS-V1-MVP-Spec.md` for the original design.
 
+For PM use, start with `PM-OPERATING-MODEL.md` and
+`PORTFOLIO-CONTROL-PLANE-RECOMMENDATION.md`.
+
 ## What works now
 
 1. **AI project-manager dashboard and expert team** - one Continue action,
@@ -95,6 +98,28 @@ build; later launches go straight to `http://127.0.0.1:8765`. Use `-Rebuild`
 after changing frontend source, `-NoOpen` to suppress browser launch, or a
 different local port with `-Port 8877`.
 
+To register another local project, click **Add** beside **Active projects**.
+The guided flow validates the folder, previews detected stack and test
+metadata, lets you set privacy and allowed AI workers, and shows a final review
+before writing anything. Registration stays local, never overwrites an
+existing `.cortex/state.md`, and does not contact an AI provider or GitHub.
+
+To remove a project, open its detail drawer and choose **Remove from Cortex**.
+Cortex first counts the local tasks, runs, decisions, and activity that will be
+deleted, then requires the exact project name and a permanent-removal
+acknowledgement. The repository, `.cortex/state.md`, branches, GitHub resources,
+and Codex tasks remain untouched. A small audit tombstone stays in the
+portfolio timeline so the owner can still see who removed the project and when.
+
+Open **Roadmap** for the portfolio schedule. It uses one shared Gantt-style
+time axis while keeping three kinds of evidence explicit: planned bars come
+only from recorded start/target/due dates, completed bars show the observed
+created-to-completed lifecycle, and work without usable dates stays in the
+off-axis queue. Filters cover one project or the active/recent/all portfolio;
+each row shows worker, milestone, progress, status, and dependency blockers.
+Click a row to edit its local schedule record. Those edits do not start an AI
+worker, contact GitHub, or claim that Cortex has calculated a critical path.
+
 The intended daily workflow is deliberately short:
 
 1. Start in **Your expert team**. Each CLI has a specialist role, current or
@@ -156,6 +181,49 @@ The `.cmd` wrapper is equivalent:
 ```powershell
 .\scripts\cortex-portfolio.cmd dashboard
 ```
+
+## Mirror approved work to GitHub Projects
+
+Cortex remains the portfolio source of truth. The GitHub Project is an
+engineering view of already-linked issues; Cortex never creates an issue,
+matches by title, bulk-syncs, or schedules this adapter.
+
+Configure and verify the target once, then use the read-only commands freely:
+
+```powershell
+.\scripts\cortex-portfolio.ps1 github configure cortex-portfolio-control-plane `
+  --owner Nogor-design --number 1
+.\scripts\cortex-portfolio.ps1 github inventory cortex-portfolio-control-plane
+.\scripts\cortex-portfolio.ps1 github link <task-id> `
+  https://github.com/<owner>/<repo>/issues/<number>
+.\scripts\cortex-portfolio.ps1 github plan <task-id>
+```
+
+`github plan` reads every Project, field, and item-field page and prints an
+immutable fingerprint plus a deterministic operation ID. It changes neither
+portfolio records nor GitHub. When a plan actually has actions, applying it
+requires both exact values printed by that fresh plan:
+
+```powershell
+.\scripts\cortex-portfolio.ps1 github apply <task-id> `
+  --approve <plan-fingerprint> `
+  --operation-id <operation-id>
+```
+
+The project drawer also has **Check GitHub mirror** for each active task. It is
+an explicit, on-demand read-only preview of the same strict plan: target and
+stable issue/item identity, actions or conflicts, fingerprint, and any durable
+recovery operation are shown together. When a safe CLI action or recovery is
+available, the dashboard can copy the exact command, but it has no GitHub apply
+endpoint and never runs that command. Portfolio polling does not contact
+GitHub; the preview requires the local dashboard Host/Origin guard and action
+token before invoking `gh`.
+
+Every field is checked immediately before its mutation, every result is
+re-read, and the local Project-item link and sync evidence commit atomically
+only after remote verification. Interrupted operations retain their exact
+operation ID and completed-action evidence; inspect one with
+`github operation <operation-id>` and resume it with the same approved command.
 
 To preview an optional daily scheduled task without installing anything:
 

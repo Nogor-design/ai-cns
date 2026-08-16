@@ -106,6 +106,70 @@ def test_portfolio_payload_exposes_expert_team_and_execution_controls(conn, proj
     assert task["execution_worker"] == "grok"
     assert task["execution_model"] == "grok-4.5"
     assert task["execution_effort"] == "medium"
-    assert grok["state"] in {"queued", "missing", "needs_auth"}
+    # The first dashboard read deliberately does not block on CLI auth probes.
+    # Until Grok's background probe resolves, "checking" is the truthful state;
+    # a probe timeout is likewise reported as "unavailable" rather than hidden.
+    assert grok["state"] in {
+        "queued", "checking", "missing", "needs_auth", "unavailable",
+    }
     assert "usage" in payload
     assert "model_performance" in payload
+
+
+def test_portfolio_payload_keeps_work_blocker_separate_and_exposes_activity(conn, project):
+    task_id = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="Track a real blocker",
+        blocked_reason="Waiting on owner approval",
+        actor_type="agent",
+        actor_name="codex",
+    )
+    payload = webapp.portfolio_payload(conn)
+    task = next(row for row in payload["tasks"] if row["id"] == task_id)
+    assert task["blocked_reason"] == "Waiting on owner approval"
+    assert "policy_blocked_reason" in task
+    assert payload["activity"][0]["action"] == "task.created"
+    assert payload["activity"][0]["actor_name"] == "codex"
+
+
+def test_portfolio_payload_has_a_slim_historical_roadmap_with_dependencies(
+    conn, project
+):
+    upstream_id = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="Finish the foundation",
+        start_at="2026-08-01",
+        target_at="2026-08-03",
+        milestone="Foundation",
+    )
+    store.update_task(conn, upstream_id, status="done")
+    downstream_id = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="Ship the roadmap",
+        due_at="2026-08-15",
+        progress=35,
+    )
+    store.add_task_dependency(conn, downstream_id, upstream_id)
+
+    payload = webapp.portfolio_payload(conn)
+    active_ids = {task["id"] for task in payload["tasks"]}
+    roadmap = {task["id"]: task for task in payload["roadmap_tasks"]}
+
+    assert upstream_id not in active_ids
+    assert downstream_id in active_ids
+    assert upstream_id in roadmap
+    assert roadmap[upstream_id]["milestone"] == "Foundation"
+    assert roadmap[downstream_id]["progress"] == 35
+    assert roadmap[downstream_id]["dependencies"] == [{
+        "task_id": downstream_id,
+        "depends_on_task_id": upstream_id,
+        "depends_on_title": "Finish the foundation",
+        "depends_on_status": "done",
+        "type": "blocks",
+        "satisfied": True,
+    }]
+    assert "route" not in roadmap[downstream_id]
+    assert "latest_run" not in roadmap[downstream_id]

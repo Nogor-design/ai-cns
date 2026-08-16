@@ -1,11 +1,11 @@
 # Cortex Portfolio Control Plane — State
-_Last updated: 2026-08-02 by Cortex_
+_Last updated: 2026-08-16 by Cortex_
 
 ## Goal (now)
-Stabilize and dogfood the 1.3.0 portfolio control plane with safe routing and daily evidence
+Make every PM session visible, attributable, drillable, and actionable across all projects
 
 ## Stack
-Python, Typer, SQLite, Git, Ollama
+Python, React, SQLite, GitHub
 
 ## Important files
 - `cortex/cli.py` - portfolio, task, routing, dispatch, result, and evidence commands
@@ -22,28 +22,35 @@ Python, Typer, SQLite, Git, Ollama
 - `README.md` - operator runbook
 
 ## Open tasks
-- [ ] Review and commit the 1.3.0 reliability, privacy-policy, and live-output changes
-- [ ] Push the local release history after choosing the desired commit boundary
-- [ ] Dogfood daily for two weeks and resolve unknown run outcomes before expanding scope
+- [ ] Add owner-gated Codex execution bridge (code; blocked; owner: owner; progress: 0%; next: Owner decides whether Cortex may start or resume paid Codex turns from the dashboard.; blocked: Explicit owner authorization is required before Cortex may create or resume a Codex task or start a paid model turn.)
+- [ ] Review and merge Cortex control-plane draft PR #1 (review; review; owner: owner; progress: 100%; next: Review guarded Remove from Cortex workflow at feature commit 2398fb1 in draft PR #1)
 
 ## Recent decisions (last ~10, newest first)
-- 2026-08-02 — Treat 1.3.0 as a stabilization checkpoint — Restart recovery, HTTP integration coverage, CI, and responsive QA are release gates — source: release-hardening review
-- 2026-08-01 — Never auto-merge agent output — All write work must pass diff, scope, and test review — source: portfolio control-plane implementation
-- 2026-08-01 — Use E:\AI-Worktrees for write agents — The E SSD avoids D HDD build contention and isolates writers — source: local hardware inspection
-- 2026-08-01 — Limit active work to three program lanes — Protects attention, premium tokens, and repository safety — source: portfolio review 2026-08-01
+- 2026-08-12 — Require Cortex updates at the start and close of every PM session — The owner needs durable attribution, drill-down evidence, and one visible next task without reconstructing chat history. — source: owner requirement 2026-08-12
+- 2026-08-12 — Use Cortex as the canonical portfolio control plane with GitHub Projects as the engineering mirror and Codex as the execution surface — This covers local and hosted projects, preserves AI attribution and evidence, and avoids duplicating GitHub-native collaboration. — source: Codex PM research 2026-08-12
+
+## Recent activity (last 10, newest first)
+- 2026-08-16T13:20 — codex — Updated work item: Review and merge Cortex control-plane draft PR #1 (task.updated)
+- 2026-08-16T13:20 — codex — Implemented and verified guarded Remove from Cortex workflow; feature commit 2398fb1 is ready in draft PR #1. (pm.session_closed)
+- 2026-08-16T13:20 — codex — Changed Add guarded project removal to the dashboard from running to done (task.status_changed)
+- 2026-08-16T13:20 — codex — Guarded project removal shipped locally with exact-record preview, exact-name confirmation, transactional deletion, active-work blockers, preserved repository and external resources, durable owner-attributed audit, 191 Python tests, 11 dashboard tests, production build, and isolated desktop/mobile browser QA. (dashboard.project_removal_verified)
+- 2026-08-16T13:01 — codex — PM session started: Add guarded project removal to the dashboard (pm.session_started)
+- 2026-08-16T13:01 — codex — Changed Add guarded project removal to the dashboard from open to running (task.status_changed)
+- 2026-08-16T13:01 — codex — Created work item: Add guarded project removal to the dashboard (task.created)
+- 2026-08-16T04:17 — codex — Changed Add guided project registration to the dashboard from running to done (task.status_changed)
+- 2026-08-16T04:17 — codex — Updated work item: Review and merge Cortex control-plane draft PR #1 (task.updated)
+- 2026-08-16T04:17 — codex — Added guarded local project preview and registration with explicit privacy, worker allowlist, state-file choice, attribution, duplicate protection, and responsive UI (pm.session_closed)
 
 ## Known risks / assumptions
-- Existing active repositories are dirty; write dispatch must remain blocked until each is checkpointed.
+- The one-task GitHub adapter is implemented and every live apply remains exact-fingerprint gated; bulk mirroring, automatic issue creation, background polling, and scheduled sync do not exist.
+- Codex App Server can list, start, and resume tasks, but its protocol cannot navigate the standalone Codex Desktop UI; the browser dashboard must keep a copy-prompt fallback.
 - Perplexity has no local CLI configured and remains a manual/API research route.
 - Local Ollama reviews are inexpensive but require bounded source evidence and premium acceptance for consequential decisions.
 - Headless provider output formats may change; adapters must remain covered by smoke tests.
-- The new GitHub Actions workflow cannot be proven remotely until the branch is pushed.
 - Routing evidence is still sparse: most recorded run outcomes need a human judgment.
 
 ## Definition of done (for this project)
-- the full test suite passes without writing test artifacts into the repository
-- `doctor`, `dashboard`, `digest`, `route`, `dispatch`, `result`, and `judge` work against the live portfolio database
-- write routes require an isolated worktree, explicit permission, and a clean canonical repository
-- no secrets or client PII leave the machine through a compiled brief
-- no agent result is merged automatically
-- Python tests, the dashboard production build, and rendered desktop/mobile smoke checks pass
+- tests pass
+- app boots
+- no secrets in diff
+- client-safe data only

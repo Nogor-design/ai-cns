@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertTriangle, Bot, Check, CheckCircle2, ChevronRight, CircleAlert,
-  CirclePlay, Clock3, Cpu, FolderGit2, GitBranch, Gauge, LayoutDashboard,
-  LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
-  Search, Sparkles, UsersRound, UserRound, WandSparkles, X,
+  Activity, AlertTriangle, Bot, CalendarRange, Check, CheckCircle2, ChevronRight, CircleAlert,
+  CirclePlay, Clock3, Copy, Cpu, FolderGit2, FolderPlus, GitBranch, Gauge, LayoutDashboard,
+  Github, LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
+  Search, ShieldCheck, Sparkles, Trash2, UsersRound, UserRound, WandSparkles, X,
 } from 'lucide-react'
+import { filterAndGroupTimeline } from './timeline.js'
+import { mirrorActionLabel, mirrorStatusMeta } from './githubMirror.js'
+import RoadmapView from './RoadmapView.jsx'
+import AddProjectModal from './AddProjectModal.jsx'
+import RemoveProjectModal from './RemoveProjectModal.jsx'
 
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
@@ -15,6 +20,7 @@ const workers = {
 
 const navItems = [
   ['overview', 'Today', LayoutDashboard], ['projects', 'All projects', FolderGit2],
+  ['roadmap', 'Roadmap', CalendarRange], ['timeline', 'Timeline', Clock3],
   ['paused', 'Paused / external', PauseCircle],
 ]
 const statuses = ['open', 'assigned', 'in_progress', 'running', 'review', 'blocked', 'done']
@@ -117,7 +123,7 @@ function WorkerBadge({ name, recommended = false }) {
 function StatusPill({ value }) { return <span className={`status-pill status-${value}`}>{pretty(value)}</span> }
 function Priority({ value }) { return <span className={`priority p${value}`}>P{value}</span> }
 
-function Sidebar({ data, active, onChange, selectedId, onSelect }) {
+function Sidebar({ data, active, onChange, selectedId, onSelect, onAddProject }) {
   const activeProjects = data.projects.filter(project => project.status === 'active').sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name))
   return (
     <aside className="sidebar">
@@ -125,7 +131,7 @@ function Sidebar({ data, active, onChange, selectedId, onSelect }) {
       <nav aria-label="Portfolio views">
         {navItems.map(([id, label, Icon]) => <button key={id} className={active === id ? 'active' : ''} onClick={() => onChange(id)}><Icon size={17} /><span>{label}</span>{id === 'paused' && <em>{data.summary.paused_projects}</em>}</button>)}
       </nav>
-      <div className="project-rail-title"><span>Active projects</span><em>{activeProjects.length}</em></div>
+      <div className="project-rail-title"><span>Active projects</span><em>{activeProjects.length}</em><button type="button" onClick={onAddProject} aria-label="Add project"><FolderPlus size={13} />Add</button></div>
       <div className="project-rail">
         {activeProjects.map(project => (
           <button key={project.project_id} className={selectedId === project.project_id ? 'selected' : ''} onClick={() => onSelect(project.project_id)}>
@@ -260,6 +266,84 @@ function RunActivity({ runs, onView }) {
   </section>
 }
 
+function timelineStatus(item) {
+  if (item.kind === 'activity') {
+    if (item.action?.includes('blocked') || item.action === 'run.failed') return 'failed'
+    if (item.action?.includes('closed') || item.action?.includes('completed') || item.action?.includes('removed')) return 'completed'
+    if (item.action?.includes('started')) return 'running'
+    if (item.action?.includes('status_changed')) return 'review'
+    return 'queued'
+  }
+  if (item.state === 'completed' && item.task_status === 'review') return 'review'
+  return item.state
+}
+
+function timelineOutcome(item) {
+  if (item.kind === 'activity') return item.summary
+  if (item.state === 'running') return 'Execution is still in progress.'
+  if (item.state === 'failed') return `Execution failed${item.exit_code == null ? '' : ` with exit code ${item.exit_code}`}.`
+  if (item.outcome && item.outcome !== 'unknown') return `Outcome: ${pretty(item.outcome)}.`
+  if (item.tests_passed === 1) return 'Tests passed; evidence was captured.'
+  if (item.tests_passed === 0) return 'Tests failed; review the captured evidence.'
+  if (item.task_status === 'review') return 'Worker output is waiting for acceptance review.'
+  return 'Execution completed and evidence was captured.'
+}
+
+function TimelineEvent({ item, linkedRun, onView }) {
+  const occurred = new Date(item.timestamp)
+  const actor = item.kind === 'activity' ? (item.actor_name || item.actor_type || 'cortex') : executionWorker(item)
+  const taskTitle = item.task_title || (item.kind === 'activity' ? 'Portfolio activity' : 'Untitled work item')
+  const content = <>
+    <span className="timeline-track" aria-hidden="true"><i className={`run-state ${timelineStatus(item)}`} /></span>
+    <span className="timeline-time">
+      <strong>{occurred.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</strong>
+      <small>{item.kind === 'run' && item.ended_at ? `to ${new Date(item.ended_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : pretty(item.action || 'recorded')}</small>
+    </span>
+    <span className="timeline-card">
+      <span className="timeline-card-heading"><span><small>{item.project_name}</small><strong>{taskTitle}</strong></span><StatusPill value={timelineStatus(item)} /></span>
+      <span className="timeline-outcome">{timelineOutcome(item)}</span>
+      <span className="timeline-meta"><WorkerBadge name={actor} /><span>{item.kind === 'run' ? durationLabel(item) : pretty(item.actor_type || 'system')}</span><code>{item.session_id || item.id}</code>{linkedRun && <em>View evidence <ChevronRight size={13} /></em>}</span>
+    </span>
+  </>
+  if (linkedRun) return <button type="button" className="timeline-event" onClick={() => onView(linkedRun)}>{content}</button>
+  return <article className="timeline-event timeline-event-static">{content}</article>
+}
+
+function EvidenceTimeline({ runs, activity, project, onView, onClearProject }) {
+  const groups = useMemo(
+    () => filterAndGroupTimeline(runs, activity, project?.project_id || null),
+    [runs, activity, project?.project_id],
+  )
+  const runMap = useMemo(() => Object.fromEntries(runs.map(run => [run.id, run])), [runs])
+  const visibleCount = groups.reduce((count, group) => count + group.events.length, 0)
+
+  return <section className="timeline-section" aria-labelledby="evidence-timeline-title">
+    <div className="timeline-heading">
+      <div>
+        <span className="eyebrow">Who did what</span>
+        <h1 id="evidence-timeline-title">{project ? `${project.name} evidence timeline` : 'Portfolio evidence timeline'}</h1>
+        <p>{project ? `Attributed work and execution history linked to ${project.name}.` : 'A chronological record of PM sessions, decisions, assignments, agent work, and review evidence across every project.'}</p>
+      </div>
+      <div className="timeline-heading-actions">
+        <span><strong>{visibleCount}</strong> recorded event{visibleCount === 1 ? '' : 's'}</span>
+        {project && <button type="button" onClick={onClearProject}>View all projects</button>}
+      </div>
+    </div>
+    <div className="timeline-container">
+      {groups.map(group => <section className="timeline-day" key={group.key} aria-labelledby={`timeline-day-${group.key}`}>
+        <div className="timeline-day-heading">
+          <h2 id={`timeline-day-${group.key}`}>{group.label}</h2>
+          <span>{group.events.length} event{group.events.length === 1 ? '' : 's'}</span>
+        </div>
+        <div className="timeline-events">
+          {group.events.map(item => <TimelineEvent key={`${item.kind}-${item.id}`} item={item} linkedRun={runMap[item.run_id]} onView={onView} />)}
+        </div>
+      </section>)}
+      {!groups.length && <div className="timeline-empty"><Clock3 size={20} /><strong>No activity history found.</strong><span>{project ? `Cortex has not recorded work for ${project.name}.` : 'PM sessions, decisions, assignments, and agent runs will appear here automatically.'}</span></div>}
+    </div>
+  </section>
+}
+
 function RunModal({ run, onClose }) {
   const live = useRunOutput(run?.id, run?.state === 'running')
   const bodyRef = useRef(null)
@@ -319,16 +403,70 @@ function WorkerAllowlist({ project, onChange }) {
   </section>
 }
 
-function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist }) {
+function DrawerTask({ task, onTaskUpdate, onStart, onCodex, onGithub }) {
+  return <div className="drawer-task"><div><strong>{task.title}</strong><span><StatusPill value={task.status} /><WorkerBadge name={task.execution_worker} /></span><small>{task.execution_model || 'default model'} · {task.execution_effort || 'auto'} effort</small></div>
+    <div className="task-safe-actions"><button type="button" className="task-codex-action" onClick={() => onCodex(task)}><Copy size={14} />{task.codex_thread_id ? 'Copy continuation prompt' : 'Copy Codex prompt'}</button><button type="button" className="task-github-action" onClick={() => onGithub(task)}><Github size={14} />Check GitHub mirror</button></div>
+    <div>{task.status === 'assigned' && !['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()) && <button onClick={() => onStart(task)}><CirclePlay size={14} />Start</button>}<select aria-label="Model" value={task.requested_model || ''} onChange={event => onTaskUpdate(task.id, { requested_model: event.target.value || null })}><option value="">Auto model</option><option value="grok-4.5">grok-4.5</option><option value="sonnet">Claude Sonnet</option><option value="opus">Claude Opus</option></select><select aria-label="Effort" value={task.effort || ''} onChange={event => onTaskUpdate(task.id, { effort: event.target.value || null })}><option value="">Auto effort</option>{['low', 'medium', 'high', 'xhigh'].map(value => <option key={value}>{value}</option>)}</select><select aria-label="Status" value={task.status} onChange={event => onTaskUpdate(task.id, { status: event.target.value })}>{statuses.map(status => <option key={status} value={status}>{pretty(status)}</option>)}</select></div>
+  </div>
+}
+
+function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist, onTimeline, onCodex, onGithub, onRemove }) {
   if (!project) return null
   return <aside className="drawer"><div className="drawer-head"><div><span className="project-monogram large" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span><span><small>{project.program}</small><h2>{project.name}</h2></span></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <div className="drawer-primary"><button onClick={() => onPlan(project.project_id, 'codex')}><Sparkles size={16} />Ask Codex to plan next</button><button onClick={() => onPlan(project.project_id, 'ollama')}><Cpu size={16} />Use local planner</button></div>
     <section><label>Current goal</label><p>{project.current_goal || 'No goal has been set.'}</p></section>
-    <section className="drawer-evidence"><label>Repository evidence</label><div><GitBranch size={14} />{project.branch || 'Not under Git'}<span>{gitLabel(project)}</span></div>{project.warnings?.[0] && <small><AlertTriangle size={13} />{project.warnings[0]}</small>}</section>
+    <section className="drawer-evidence"><label>Repository evidence</label><div><GitBranch size={14} />{project.branch || 'Not under Git'}<span>{gitLabel(project)}</span></div>{project.warnings?.[0] && <small><AlertTriangle size={13} />{project.warnings[0]}</small>}<button type="button" className="drawer-timeline-action" onClick={() => onTimeline(project.project_id)}><Clock3 size={14} />View project timeline</button></section>
     <WorkerAllowlist project={project} onChange={onAllowlist} />
-    <section><div className="drawer-section-head"><label>Active work ({project.tasks.length})</label><button onClick={() => onManual(project.project_id)}><Plus size={13} />Manual</button></div><div className="drawer-task-list">{project.tasks.map(task => <div className="drawer-task" key={task.id}><div><strong>{task.title}</strong><span><StatusPill value={task.status} /><WorkerBadge name={task.execution_worker} /></span><small>{task.execution_model || 'default model'} · {task.execution_effort || 'auto'} effort</small></div><div>{task.status === 'assigned' && !['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()) && <button onClick={() => onStart(task)}><CirclePlay size={14} />Start</button>}<select aria-label="Model" value={task.requested_model || ''} onChange={event => onTaskUpdate(task.id, { requested_model: event.target.value || null })}><option value="">Auto model</option><option value="grok-4.5">grok-4.5</option><option value="sonnet">Claude Sonnet</option><option value="opus">Claude Opus</option></select><select aria-label="Effort" value={task.effort || ''} onChange={event => onTaskUpdate(task.id, { effort: event.target.value || null })}><option value="">Auto effort</option>{['low', 'medium', 'high', 'xhigh'].map(value => <option key={value}>{value}</option>)}</select><select aria-label="Status" value={task.status} onChange={event => onTaskUpdate(task.id, { status: event.target.value })}>{statuses.map(status => <option key={status} value={status}>{pretty(status)}</option>)}</select></div></div>)}{!project.tasks.length && <div className="lane-empty">No active tasks.</div>}</div></section>
+    <section><div className="drawer-section-head"><label>Active work ({project.tasks.length})</label><button onClick={() => onManual(project.project_id)}><Plus size={13} />Manual</button></div><div className="drawer-task-list">{project.tasks.map(task => <DrawerTask key={task.id} task={task} onTaskUpdate={onTaskUpdate} onStart={onStart} onCodex={onCodex} onGithub={onGithub} />)}{!project.tasks.length && <div className="lane-empty">No active tasks.</div>}</div></section>
     <div className="drawer-path"><FolderGit2 size={14} /><span title={project.repo_path}>{project.repo_path}</span></div>
+    <button type="button" className="drawer-remove-project" onClick={() => onRemove(project)}><Trash2 size={13} />Remove from Cortex</button>
   </aside>
+}
+
+function CodexLaunchModal({ launch, onClose, onCopied }) {
+  const [copied, setCopied] = useState(false)
+  if (!launch) return null
+  const capability = launch.payload?.capability
+  async function copyPrompt() {
+    await navigator.clipboard.writeText(launch.payload.prompt)
+    setCopied(true)
+    onCopied()
+  }
+  return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}><section className="codex-launch-modal" aria-labelledby="codex-launch-title">
+    <div className="modal-head"><div><span className="eyebrow">Safe handoff preview</span><h2 id="codex-launch-title">{launch.task.codex_thread_id ? 'Continue Codex task' : 'Task Codex next'}</h2><p>{launch.task.title}</p></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></div>
+    {launch.loading ? <div className="codex-launch-loading"><LoaderCircle className="spin" size={18} />Checking the local Codex bridge and building the bounded prompt…</div> : <>
+      <div className={`codex-capability ${capability?.available ? 'ready' : 'fallback'}`}><span><Bot size={16} /><strong>{capability?.available ? 'Local Codex capability detected' : 'Copy-prompt fallback active'}</strong></span><small>{capability?.available ? `${capability.threads.length} existing Codex task${capability.threads.length === 1 ? '' : 's'} found for this exact repository path.` : capability?.reason || 'The local App Server could not be inspected.'}</small>{launch.payload.codex_thread_id && <code>{launch.payload.codex_thread_id}{capability?.linked_thread_found ? ' · linked task found' : ' · linked task not currently listed'}</code>}</div>
+      <label className="codex-prompt-label">Bounded Codex prompt<textarea aria-label="Codex launch prompt" readOnly rows="16" value={launch.payload.prompt} /></label>
+      <div className="codex-launch-note"><AlertTriangle size={15} /><span>This copy-only preview does not create or resume a Codex task, start a model turn, spend tokens, or navigate Codex Desktop.</span></div>
+      <div className="modal-actions"><button type="button" onClick={onClose}>Close</button><button type="button" className="primary" onClick={copyPrompt}><Copy size={14} />{copied ? 'Copied' : launch.task.codex_thread_id ? 'Copy continuation prompt' : 'Copy Codex prompt'}</button></div>
+    </>}
+  </section></div>
+}
+
+function GitHubMirrorModal({ launch, onClose, onCopied }) {
+  const [copied, setCopied] = useState(false)
+  if (!launch) return null
+  const payload = launch.payload
+  const meta = mirrorStatusMeta(payload?.status)
+  const plan = payload?.plan
+  const operation = payload?.operation
+  async function copyCommand() {
+    await navigator.clipboard.writeText(payload.command)
+    setCopied(true)
+    onCopied(payload.command_kind)
+  }
+  return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}><section className="github-mirror-modal" aria-labelledby="github-mirror-title">
+    <div className="modal-head"><div><span className="eyebrow">On-demand GitHub check</span><h2 id="github-mirror-title">GitHub mirror readiness</h2><p>{launch.task.title}</p></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></div>
+    {launch.loading ? <div className="github-mirror-loading" role="status"><LoaderCircle className="spin" size={18} />Reading every Project, item, field, and value page…</div> : <>
+      <div className={`github-mirror-status ${meta.tone}`}><span>{meta.tone === 'ready' ? <CheckCircle2 size={17} /> : meta.tone === 'danger' ? <CircleAlert size={17} /> : <ShieldCheck size={17} />}<strong>{meta.label}</strong></span><small>{payload.summary}</small></div>
+      <div className="github-mirror-facts"><span><small>Target</small><strong>{payload.target ? `${payload.target.title || payload.target.owner} · Project #${payload.target.number}` : 'Not configured'}</strong>{payload.target?.project_id && <code>{payload.target.project_id}</code>}</span><span><small>Linked issue</small><strong>{payload.issue?.number ? `#${payload.issue.number}${payload.issue.title ? ` · ${payload.issue.title}` : ''}` : 'Not linked'}</strong>{payload.issue?.url && <a href={payload.issue.url} target="_blank" rel="noreferrer">Open issue</a>}</span><span><small>Project item</small><strong>{plan?.project_item_id || operation?.github_project_item_id || 'Not recorded'}</strong></span></div>
+      {plan && <div className="github-plan-evidence"><div><span><small>Fresh plan fingerprint</small><code>{plan.fingerprint}</code></span><span><small>Snapshot digest</small><code>{plan.snapshot_digest}</code></span></div>{plan.actions.length > 0 && <section><h3>Planned actions ({plan.actions.length})</h3><ul>{plan.actions.map((action, index) => <li key={`${action.kind}-${action.field || index}`}><strong>{mirrorActionLabel(action)}</strong><span>{action.reason}</span></li>)}</ul></section>}{plan.conflicts.length > 0 && <section className="github-conflicts"><h3>Conflicts ({plan.conflicts.length})</h3><ul>{plan.conflicts.map(conflict => <li key={conflict.code}><strong>{pretty(conflict.code)}</strong><span>{conflict.summary}</span></li>)}</ul></section>}</div>}
+      {operation && <div className={`github-operation ${['applying', 'interrupted'].includes(operation.status) ? 'recoverable' : ''}`}><span><small>Latest durable operation</small><strong>{operation.operation_id} · {pretty(operation.status)}</strong></span><span><small>Verified steps</small><strong>{operation.completed_actions?.length || 0} / {operation.actions?.length || 0}</strong></span>{operation.error && <p>{operation.error}</p>}{payload.read_error && <p>Fresh read: {payload.read_error}</p>}</div>}
+      {payload.command && <label className="github-command-label">Exact {payload.command_kind === 'resume' ? 'recovery' : 'approved apply'} command<textarea aria-label="GitHub mirror CLI command" readOnly rows="3" value={payload.command} /></label>}
+      <div className="codex-launch-note"><AlertTriangle size={15} /><span>{payload.note} Review the fingerprint and actions before running any copied command in PowerShell.</span></div>
+      <div className="modal-actions"><button type="button" onClick={onClose}>Close</button>{payload.command && <button type="button" className="primary" onClick={copyCommand}><Copy size={14} />{copied ? 'Copied' : payload.command_kind === 'resume' ? 'Copy recovery command' : 'Copy apply command'}</button>}</div>
+    </>}
+  </section></div>
 }
 
 function ManualTaskModal({ projects, initialProject, onClose, onCreated }) {
@@ -346,7 +484,21 @@ export default function App() {
   const [error, setError] = useState(''), [toast, setToast] = useState('')
   const [manualProject, setManualProject] = useState(undefined)
   const [selectedRun, setSelectedRun] = useState(null)
+  const [timelineProjectId, setTimelineProjectId] = useState(null)
+  const [codexLaunch, setCodexLaunch] = useState(null)
+  const [githubLaunch, setGithubLaunch] = useState(null)
+  const [showAddProject, setShowAddProject] = useState(false)
+  const [removalProject, setRemovalProject] = useState(null)
   const pollRef = useRef(null)
+
+  const previewProjectRemoval = useCallback(async projectId => {
+    const payload = await request(`/api/projects/${projectId}/removal-preview`, {
+      method: 'POST',
+      body: '{}',
+      headers: { 'X-Cortex-Action-Token': data?.action_token || '' },
+    })
+    return payload.preview
+  }, [data?.action_token])
 
   async function load(silent = false) { if (!silent) setError(''); try { const [portfolio, jobPayload] = await Promise.all([request('/api/portfolio'), request('/api/jobs')]); setData({ ...portfolio, jobs: jobPayload.jobs }) } catch (err) { setError(err.message) } }
   useEffect(() => { load(); return () => clearInterval(pollRef.current) }, [])
@@ -367,6 +519,7 @@ export default function App() {
   const visibleRuns = (data?.runs || []).filter(run => visibleIds.has(run.project_id))
   const serverRunningJobs = (data?.jobs || []).filter(item => item.status === 'running')
   const selected = projectMap[selectedId] || null
+  const timelineProject = projectMap[timelineProjectId] || null
 
   useEffect(() => {
     if (!serverRunningJobs.length || job) return undefined
@@ -436,35 +589,119 @@ export default function App() {
   }
 
   async function updateTask(id, fields) { try { await request(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }); setToast('Task updated'); await load(true) } catch (err) { setError(err.message) } }
+  async function saveTaskSchedule(id, fields) {
+    try {
+      await request(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(fields) })
+      setToast('Local schedule updated')
+      await load(true)
+      return true
+    } catch (err) {
+      setError(err.message)
+      return false
+    }
+  }
+  async function previewProject(repoPath) {
+    const payload = await request('/api/projects/preview', {
+      method: 'POST',
+      body: JSON.stringify({ repo_path: repoPath }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    return payload.preview
+  }
+  async function registerProject(fields) {
+    const payload = await request('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify(fields),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    setSelectedId(payload.project.id)
+    setActiveNav('projects')
+    setToast(`${payload.project.name} added to Cortex`)
+    return payload
+  }
+  async function removeProject(projectId, confirmation) {
+    const projectName = projectMap[projectId]?.name || 'Project'
+    const payload = await request(`/api/projects/${projectId}`, {
+      method: 'DELETE',
+      body: JSON.stringify(confirmation),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    setSelectedId(null)
+    if (timelineProjectId === projectId) setTimelineProjectId(null)
+    await load(true)
+    setToast(`${projectName} removed from Cortex; repository left untouched`)
+    return payload
+  }
   async function updateAllowlist(projectId, allowed) { try { await request(`/api/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify({ allowed_workers: allowed }) }); setToast(`Allowlist updated: ${allowed.join(', ')}`); await load(true) } catch (err) { setError(err.message) } }
   async function dismissSuggestion(id) { try { await request(`/api/suggestions/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'dismissed' }) }); setToast('Suggestion dismissed'); await load(true) } catch (err) { setError(err.message) } }
   async function keepTeamWorking() { try { const payload = await request('/api/team/keep-working', { method: 'POST', body: JSON.stringify({ limit: 3 }) }); if (!payload.job_ids.length) { setToast('No safe approved assignments are waiting; ask the PM to plan a project'); await load(true); return } watchJob(payload.job_ids[0], 'Starting team') } catch (err) { setError(err.message) } }
   async function refreshGit() { try { const payload = await request('/api/git/refresh', { method: 'POST', body: JSON.stringify({ fetch: true }) }); watchJob(payload.job_id, 'Checking GitHub') } catch (err) { setError(err.message) } }
+  async function previewCodex(task) {
+    setCodexLaunch({ task, loading: true, payload: null })
+    try {
+      const payload = await request(`/api/tasks/${task.id}/codex/preview`, { method: 'POST', body: '{}', headers: { 'X-Cortex-Action-Token': data.action_token } })
+      setCodexLaunch({ task, loading: false, payload })
+      await load(true)
+    } catch (err) {
+      setCodexLaunch(null)
+      setError(err.message)
+    }
+  }
+
+  async function previewGithub(task) {
+    setGithubLaunch({ task, loading: true, payload: null })
+    try {
+      const payload = await request(`/api/tasks/${task.id}/github/preview`, { method: 'POST', body: '{}', headers: { 'X-Cortex-Action-Token': data.action_token } })
+      setGithubLaunch({ task, loading: false, payload })
+    } catch (err) {
+      setGithubLaunch(null)
+      setError(err.message)
+    }
+  }
+
+  function changeNav(next) {
+    if (next === 'timeline') setTimelineProjectId(null)
+    if (next === 'timeline' || next === 'roadmap') setSelectedId(null)
+    setActiveNav(next)
+  }
+
+  function openProjectTimeline(projectId) {
+    setTimelineProjectId(projectId)
+    setSelectedId(null)
+    setActiveNav('timeline')
+  }
 
   if (!data && !error) return <div className="app-loading"><LoaderCircle className="spin" size={22} />Loading your portfolio…</div>
   if (!data) return <div className="app-loading error"><CircleAlert size={24} /><strong>Dashboard unavailable</strong><span>{error}</span><button onClick={() => load()}><RotateCcw size={15} />Retry</button></div>
 
   return <div className="app-shell">
-    <Sidebar data={data} active={activeNav} onChange={setActiveNav} selectedId={selectedId} onSelect={setSelectedId} />
+    <Sidebar data={data} active={activeNav} onChange={changeNav} selectedId={selectedId} onSelect={setSelectedId} onAddProject={() => setShowAddProject(true)} />
     <div className={`content-shell ${selected ? 'drawer-open' : ''}`}><main>
       <header className="topbar"><div><span className="eyebrow">Local AI control plane</span><strong>Cortex Portfolio</strong></div><div><label className="search"><Search size={15} /><input aria-label="Search projects" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search projects" /></label><button className="icon-button" onClick={() => load()} aria-label="Refresh"><RefreshCw size={16} /></button></div></header>
       {error && <div className="error-banner"><CircleAlert size={15} /><span>{error}</span><button onClick={() => setError('')}><X size={14} /></button></div>}
       {(job || serverRunningJobs.length > 0) && <div className="job-banner"><LoaderCircle className="spin" size={16} /><span><strong>{job?.label || pretty(serverRunningJobs[0]?.kind || 'Worker')}</strong> is active. Execution activity below shows the worker and elapsed time.</span></div>}
       <div className="main-content">
-        <Hero planner={planner} setPlanner={setPlanner} onContinue={continueWork} busy={Boolean(job) || serverRunningJobs.length > 0} onManual={() => setManualProject(null)} />
-        <div className="summary-line"><span><strong>{data.summary.needs_decision}</strong> need you</span><span><strong>{data.summary.working}</strong> assigned / working</span><span><strong>{data.summary.recommendations}</strong> ready to approve</span><span><strong>{data.summary.active_projects}</strong> active projects</span><em>Plans are cached to conserve tokens</em></div>
-        <TeamPanel team={data.team || []} onKeepWorking={keepTeamWorking} busy={Boolean(job) || serverRunningJobs.length > 0} />
-        <DecisionLane tasks={decisions} projects={projectMap} onSelect={setSelectedId} onViewRun={setSelectedRun} />
-        <WorkingLane tasks={working} projects={projectMap} onStart={startTask} onSelect={setSelectedId} />
-        <RunActivity runs={visibleRuns} onView={setSelectedRun} />
-        <RecommendationLane suggestions={suggestions} projects={projectMap} selectedProject={selected} onApprove={approveSuggestion} onDismiss={dismissSuggestion} onPlan={() => planProject(selectedId)} planning={job?.label === 'Planning' || serverRunningJobs.some(item => item.kind === 'plan')} />
-        <HealthPanel data={data} onGitRefresh={refreshGit} busy={job?.label === 'Checking GitHub' || serverRunningJobs.some(item => item.kind === 'git')} />
-        <ProjectsTable projects={filteredProjects} selectedId={selectedId} onSelect={setSelectedId} onPlan={id => planProject(id)} />
+        {activeNav === 'timeline' ? <EvidenceTimeline runs={data.runs || []} activity={data.activity || []} project={timelineProject} onView={setSelectedRun} onClearProject={() => setTimelineProjectId(null)} /> : activeNav === 'roadmap' ? <RoadmapView tasks={data.roadmap_tasks || []} projects={data.projects || []} onSaveTask={saveTaskSchedule} /> : <>
+          <Hero planner={planner} setPlanner={setPlanner} onContinue={continueWork} busy={Boolean(job) || serverRunningJobs.length > 0} onManual={() => setManualProject(null)} />
+          <div className="summary-line"><span><strong>{data.summary.needs_decision}</strong> need you</span><span><strong>{data.summary.working}</strong> assigned / working</span><span><strong>{data.summary.recommendations}</strong> ready to approve</span><span><strong>{data.summary.active_projects}</strong> active projects</span><em>Plans are cached to conserve tokens</em></div>
+          <TeamPanel team={data.team || []} onKeepWorking={keepTeamWorking} busy={Boolean(job) || serverRunningJobs.length > 0} />
+          <DecisionLane tasks={decisions} projects={projectMap} onSelect={setSelectedId} onViewRun={setSelectedRun} />
+          <WorkingLane tasks={working} projects={projectMap} onStart={startTask} onSelect={setSelectedId} />
+          <RunActivity runs={visibleRuns} onView={setSelectedRun} />
+          <RecommendationLane suggestions={suggestions} projects={projectMap} selectedProject={selected} onApprove={approveSuggestion} onDismiss={dismissSuggestion} onPlan={() => planProject(selectedId)} planning={job?.label === 'Planning' || serverRunningJobs.some(item => item.kind === 'plan')} />
+          <HealthPanel data={data} onGitRefresh={refreshGit} busy={job?.label === 'Checking GitHub' || serverRunningJobs.some(item => item.kind === 'git')} />
+          <ProjectsTable projects={filteredProjects} selectedId={selectedId} onSelect={setSelectedId} onPlan={id => planProject(id)} />
+        </>}
         <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges or external actions</span></footer>
       </div>
-    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} /></div>
+    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} onTimeline={openProjectTimeline} onCodex={previewCodex} onGithub={previewGithub} onRemove={setRemovalProject} /></div>
     {manualProject !== undefined && <ManualTaskModal projects={data.projects} initialProject={manualProject || ''} onClose={() => setManualProject(undefined)} onCreated={async () => { setManualProject(undefined); setToast('Manual task added'); await load(true) }} />}
     <RunModal run={selectedRun} onClose={() => setSelectedRun(null)} />
+    <CodexLaunchModal launch={codexLaunch} onClose={() => setCodexLaunch(null)} onCopied={() => setToast('Bounded Codex prompt copied')} />
+    <GitHubMirrorModal launch={githubLaunch} onClose={() => setGithubLaunch(null)} onCopied={kind => setToast(kind === 'resume' ? 'Recovery command copied; review before running' : 'Approved apply command copied; review before running')} />
+    {showAddProject && <AddProjectModal onClose={() => setShowAddProject(false)} onPreview={previewProject} onRegister={registerProject} />}
+    {removalProject && <RemoveProjectModal project={removalProject} onClose={() => setRemovalProject(null)} onPreview={previewProjectRemoval} onRemove={removeProject} />}
     {toast && <div className="toast"><Check size={15} />{toast}</div>}
   </div>
 }

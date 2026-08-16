@@ -24,10 +24,266 @@ TASK_STATUSES = {
 }
 STATE_MODES = {"tracked", "deferred"}
 SUGGESTION_STATUSES = {"proposed", "converted", "dismissed"}
+DEPENDENCY_TYPES = {"blocks"}
+GITHUB_MIRROR_OPERATION_STATUSES = {
+    "applying", "interrupted", "verified", "refused", "failed",
+}
 
 
 class NotFound(LookupError):
     pass
+
+
+def _json(value: Any) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, sort_keys=True)
+
+
+def _insert_activity(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    action: str,
+    summary: str,
+    task_id: str | None = None,
+    actor_type: str = "system",
+    actor_name: str | None = "cortex",
+    model: str | None = None,
+    source: str = "cortex",
+    source_ref: str | None = None,
+    session_id: str | None = None,
+    evidence: Any = None,
+    occurred_at: str | None = None,
+) -> str:
+    event_id = ids.short_id()
+    conn.execute(
+        """INSERT INTO activity_events
+           (id, project_id, task_id, actor_type, actor_name, model, action,
+            summary, source, source_ref, session_id, occurred_at, evidence_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            event_id, project_id, task_id, actor_type, actor_name, model,
+            action, summary, source, source_ref, session_id, occurred_at or ids.now(),
+            _json(evidence),
+        ),
+    )
+    return event_id
+
+
+def create_activity_event(
+    conn: sqlite3.Connection, *, commit: bool = True, **fields: Any
+) -> str:
+    event_id = _insert_activity(conn, **fields)
+    if commit:
+        conn.commit()
+    return event_id
+
+
+def list_activity_events(
+    conn: sqlite3.Connection,
+    project_id: str | None = None,
+    *,
+    task_id: str | None = None,
+    session_id: str | None = None,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if project_id:
+        clauses.append("activity_events.project_id = ?")
+        params.append(project_id)
+    if task_id:
+        clauses.append("activity_events.task_id = ?")
+        params.append(task_id)
+    if session_id:
+        clauses.append("activity_events.session_id = ?")
+        params.append(session_id)
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    params.append(max(1, min(500, limit)))
+    return conn.execute(
+        f"""SELECT activity_events.*, projects.name AS project_name,
+                   tasks.title AS task_title
+            FROM activity_events
+            JOIN projects ON projects.id = activity_events.project_id
+            LEFT JOIN tasks ON tasks.id = activity_events.task_id
+            {where}
+            ORDER BY activity_events.occurred_at DESC, activity_events.id DESC
+            LIMIT ?""",
+        params,
+    ).fetchall()
+
+
+# --------------------------------------------------- GitHub mirror operations ---
+def get_github_mirror_operation(
+    conn: sqlite3.Connection, operation_id: str
+) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT * FROM github_mirror_operations WHERE operation_id = ?",
+        (operation_id,),
+    ).fetchone()
+    if row is None:
+        raise NotFound(f"GitHub mirror operation not found: {operation_id}")
+    return row
+
+
+def latest_github_mirror_operation(
+    conn: sqlite3.Connection, task_id: str
+) -> sqlite3.Row | None:
+    """Return the newest durable mirror attempt for one task, if any."""
+    return conn.execute(
+        """SELECT * FROM github_mirror_operations
+           WHERE task_id = ?
+           ORDER BY created_at DESC, operation_id DESC
+           LIMIT 1""",
+        (task_id,),
+    ).fetchone()
+
+
+def claim_github_mirror_operation(
+    conn: sqlite3.Connection,
+    *,
+    operation_id: str,
+    task_id: str,
+    project_id: str,
+    plan_fingerprint: str,
+    github_project_id: str,
+    github_issue_id: str | None,
+    github_project_item_id: str | None,
+    actor: str,
+    session_id: str | None,
+    actions: Any,
+) -> tuple[sqlite3.Row, bool]:
+    """Durably reserve one exact plan before the first remote mutation.
+
+    The task/fingerprint uniqueness constraint prevents replay under a new
+    operation id. Returning the existing row makes verified retries idempotent
+    and gives interrupted operations a stable recovery key.
+    """
+    existing = conn.execute(
+        """SELECT * FROM github_mirror_operations
+           WHERE operation_id = ? OR (task_id = ? AND plan_fingerprint = ?)
+           ORDER BY operation_id = ? DESC LIMIT 1""",
+        (operation_id, task_id, plan_fingerprint, operation_id),
+    ).fetchone()
+    if existing is not None:
+        if (
+            existing["task_id"] != task_id
+            or existing["plan_fingerprint"] != plan_fingerprint
+        ):
+            raise ValueError("operation id is already bound to a different mirror plan")
+        return existing, False
+    active = conn.execute(
+        """SELECT operation_id FROM github_mirror_operations
+           WHERE task_id = ? AND status IN ('applying', 'interrupted')
+           LIMIT 1""",
+        (task_id,),
+    ).fetchone()
+    if active is not None:
+        raise ValueError(
+            f"task already has recoverable mirror operation {active['operation_id']}"
+        )
+    ts = ids.now()
+    conn.execute(
+        """INSERT INTO github_mirror_operations
+           (operation_id, task_id, project_id, plan_fingerprint,
+            github_project_id, github_issue_id, github_project_item_id,
+            status, actor, session_id, actions_json, completed_actions_json,
+            created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            operation_id, task_id, project_id, plan_fingerprint,
+            github_project_id, github_issue_id, github_project_item_id,
+            "applying", actor, session_id, _json(actions) or "[]", "[]", ts, ts,
+        ),
+    )
+    _insert_activity(
+        conn,
+        project_id=project_id,
+        task_id=task_id,
+        actor_type="agent" if actor != "owner" else "human",
+        actor_name=actor,
+        action="github.mirror_apply_started",
+        summary=f"Started approved GitHub mirror operation {operation_id}",
+        source="github-mirror",
+        source_ref=operation_id,
+        session_id=session_id,
+        evidence={"plan_fingerprint": plan_fingerprint, "actions": actions},
+    )
+    conn.commit()
+    return get_github_mirror_operation(conn, operation_id), True
+
+
+def update_github_mirror_operation(
+    conn: sqlite3.Connection,
+    operation_id: str,
+    *,
+    status: str | None = None,
+    completed_actions: Any = None,
+    github_project_item_id: str | None = None,
+    evidence: Any = None,
+    error: str | None = None,
+    commit: bool = True,
+) -> None:
+    get_github_mirror_operation(conn, operation_id)
+    fields: dict[str, Any] = {}
+    if status is not None:
+        if status not in GITHUB_MIRROR_OPERATION_STATUSES:
+            raise ValueError(f"invalid GitHub mirror operation status: {status}")
+        fields["status"] = status
+        if status in {"verified", "refused", "failed"}:
+            fields["completed_at"] = ids.now()
+    if completed_actions is not None:
+        fields["completed_actions_json"] = _json(completed_actions) or "[]"
+    if github_project_item_id is not None:
+        fields["github_project_item_id"] = github_project_item_id
+    if evidence is not None:
+        fields["evidence_json"] = _json(evidence)
+    if error is not None:
+        fields["error"] = error
+    if not fields:
+        return
+    fields["updated_at"] = ids.now()
+    cols = ", ".join(f"{key} = ?" for key in fields)
+    conn.execute(
+        f"UPDATE github_mirror_operations SET {cols} WHERE operation_id = ?",
+        (*fields.values(), operation_id),
+    )
+    if commit:
+        conn.commit()
+
+
+def _parent_would_cycle(
+    conn: sqlite3.Connection, task_id: str, parent_id: str
+) -> bool:
+    current_id: str | None = parent_id
+    seen: set[str] = set()
+    while current_id:
+        if current_id == task_id or current_id in seen:
+            return True
+        seen.add(current_id)
+        row = conn.execute(
+            "SELECT parent_id FROM tasks WHERE id = ?", (current_id,)
+        ).fetchone()
+        current_id = row["parent_id"] if row else None
+    return False
+
+
+def _dependency_would_cycle(
+    conn: sqlite3.Connection, task_id: str, depends_on_task_id: str
+) -> bool:
+    row = conn.execute(
+        """WITH RECURSIVE upstream(id) AS (
+               SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?
+               UNION
+               SELECT dependency.depends_on_task_id
+               FROM task_dependencies AS dependency
+               JOIN upstream ON dependency.task_id = upstream.id
+           )
+           SELECT 1 FROM upstream WHERE id = ? LIMIT 1""",
+        (depends_on_task_id, task_id),
+    ).fetchone()
+    return row is not None
 
 
 # ---------------------------------------------------------------- projects ---
@@ -44,25 +300,51 @@ def create_project(
     privacy: str = "internal",
     state_mode: str = "tracked",
     project_id: str | None = None,
+    allowed_workers: str | list[str] | tuple[str, ...] | None = None,
+    actor_type: str = "system",
+    actor_name: str | None = None,
+    source: str = "cortex",
+    record_activity: bool = False,
+    commit: bool = True,
 ) -> str:
     priority = max(1, min(5, priority))
     if privacy not in PRIVACY_LEVELS:
         privacy = "internal"
     if state_mode not in STATE_MODES:
         state_mode = "tracked"
+    if allowed_workers is not None:
+        from . import policy
+
+        allowed_workers = policy.encode(
+            allowed_workers
+            if isinstance(allowed_workers, (list, tuple, set))
+            else str(allowed_workers).replace(",", "\n").split()
+        )
     pid = project_id or ids.slugify(name)
     ts = ids.now()
     conn.execute(
         """INSERT INTO projects
            (id, name, repo_path, stack, status, program, priority, privacy,
-            state_mode, current_goal, test_command, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            state_mode, current_goal, test_command, allowed_workers, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             pid, name, repo_path, stack, "active", program, priority, privacy,
-            state_mode, current_goal, test_command, ts,
+            state_mode, current_goal, test_command, allowed_workers, ts,
         ),
     )
-    conn.commit()
+    if record_activity:
+        _insert_activity(
+            conn,
+            project_id=pid,
+            actor_type=actor_type,
+            actor_name=actor_name or "cortex",
+            action="project.created",
+            summary=f"Registered project: {name}",
+            source=source,
+            source_ref=pid,
+        )
+    if commit:
+        conn.commit()
     return pid
 
 
@@ -131,6 +413,24 @@ def create_task(
     priority: int = 3,
     assignee: str | None = None,
     due_at: str | None = None,
+    parent_id: str | None = None,
+    milestone: str | None = None,
+    start_at: str | None = None,
+    target_at: str | None = None,
+    progress: int = 0,
+    blocked_reason: str | None = None,
+    next_action: str | None = None,
+    github_issue_id: str | None = None,
+    github_issue_number: int | None = None,
+    github_issue_url: str | None = None,
+    github_project_item_id: str | None = None,
+    codex_thread_id: str | None = None,
+    pm_session_id: str | None = None,
+    sync_state: str | None = None,
+    actor_type: str = "system",
+    actor_name: str | None = None,
+    source: str = "cortex",
+    commit: bool = True,
 ) -> str:
     if type not in TASK_TYPES:
         type = "other"
@@ -139,24 +439,51 @@ def create_task(
     if complexity is not None:
         complexity = max(0, min(10, complexity))
     priority = max(1, min(5, int(priority)))
+    progress = max(0, min(100, int(progress)))
     if effort not in EFFORT_LEVELS:
         effort = None
+    if parent_id:
+        parent = get_task(conn, parent_id)
+        if parent["project_id"] != project_id:
+            raise ValueError("parent task must belong to the same project")
+    _validate_github_task_links(
+        conn,
+        github_issue_id=github_issue_id,
+        github_project_item_id=github_project_item_id,
+    )
     tid = ids.short_id()
     ts = ids.now()
     conn.execute(
         """INSERT INTO tasks
            (id, project_id, title, type, status, brief, risk, complexity,
             acceptance, allowed_paths, budget, requested_model, effort,
-            priority, assignee, due_at,
-            created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            priority, assignee, due_at, parent_id, milestone, start_at,
+            target_at, progress, blocked_reason, next_action, github_issue_id,
+            github_issue_number, github_issue_url, github_project_item_id,
+            codex_thread_id, pm_session_id, sync_state, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             tid, project_id, title, type, "open", brief, risk, complexity,
             acceptance, allowed_paths, budget, requested_model, effort,
-            priority, assignee, due_at, ts, ts,
+            priority, assignee, due_at, parent_id, milestone, start_at,
+            target_at, progress, blocked_reason, next_action, github_issue_id,
+            github_issue_number, github_issue_url, github_project_item_id,
+            codex_thread_id, pm_session_id, sync_state, ts, ts,
         ),
     )
-    conn.commit()
+    _insert_activity(
+        conn,
+        project_id=project_id,
+        task_id=tid,
+        actor_type=actor_type,
+        actor_name=actor_name or "cortex",
+        action="task.created",
+        summary=f"Created work item: {title}",
+        source=source,
+        source_ref=tid,
+    )
+    if commit:
+        conn.commit()
     return tid
 
 
@@ -195,9 +522,19 @@ def list_all_tasks(
     ).fetchall()
 
 
-def update_task(conn: sqlite3.Connection, task_id: str, **fields: Any) -> None:
+def update_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    actor_type: str = "system",
+    actor_name: str | None = None,
+    source: str = "cortex",
+    commit: bool = True,
+    **fields: Any,
+) -> None:
     if not fields:
         return
+    current = get_task(conn, task_id)
     if "risk" in fields and fields["risk"] not in TASK_RISKS:
         raise ValueError(f"invalid task risk: {fields['risk']}")
     if "complexity" in fields and fields["complexity"] is not None:
@@ -208,12 +545,292 @@ def update_task(conn: sqlite3.Connection, task_id: str, **fields: Any) -> None:
         fields["priority"] = max(1, min(5, int(fields["priority"])))
     if "effort" in fields and fields["effort"] not in EFFORT_LEVELS | {None}:
         raise ValueError(f"invalid effort: {fields['effort']}")
+    if "progress" in fields:
+        fields["progress"] = max(0, min(100, int(fields["progress"])))
+    if "parent_id" in fields and fields["parent_id"]:
+        if fields["parent_id"] == task_id:
+            raise ValueError("task cannot be its own parent")
+        parent = get_task(conn, fields["parent_id"])
+        if parent["project_id"] != current["project_id"]:
+            raise ValueError("parent task must belong to the same project")
+        if _parent_would_cycle(conn, task_id, fields["parent_id"]):
+            raise ValueError("parent relationship would create a cycle")
+    if {"github_issue_id", "github_project_item_id"} & fields.keys():
+        _validate_github_task_links(
+            conn,
+            task_id=task_id,
+            github_issue_id=fields.get("github_issue_id", current["github_issue_id"]),
+            github_project_item_id=fields.get(
+                "github_project_item_id", current["github_project_item_id"]
+            ),
+        )
+    if fields.get("status") == "done":
+        fields.setdefault("completed_at", ids.now())
+        fields["progress"] = 100
+    elif "status" in fields and current["status"] == "done":
+        fields.setdefault("completed_at", None)
     fields["updated_at"] = ids.now()
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(
         f"UPDATE tasks SET {cols} WHERE id = ?", (*fields.values(), task_id)
     )
+    changes = {
+        key: {"from": current[key], "to": value}
+        for key, value in fields.items()
+        if key != "updated_at" and key in current.keys() and current[key] != value
+    }
+    if changes:
+        action = "task.status_changed" if "status" in changes else "task.updated"
+        if "status" in changes:
+            summary = f"Changed {current['title']} from {changes['status']['from']} to {changes['status']['to']}"
+        else:
+            summary = f"Updated work item: {current['title']}"
+        _insert_activity(
+            conn,
+            project_id=current["project_id"],
+            task_id=task_id,
+            actor_type=actor_type,
+            actor_name=actor_name or "cortex",
+            action=action,
+            summary=summary,
+            source=source,
+            source_ref=task_id,
+            evidence=changes,
+        )
+    if commit:
+        conn.commit()
+
+
+def _validate_github_task_links(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str | None = None,
+    github_issue_id: str | None = None,
+    github_project_item_id: str | None = None,
+) -> None:
+    for column, value in (
+        ("github_issue_id", github_issue_id),
+        ("github_project_item_id", github_project_item_id),
+    ):
+        if not value:
+            continue
+        params: tuple[Any, ...] = (value,)
+        exclusion = ""
+        if task_id:
+            exclusion = " AND id != ?"
+            params += (task_id,)
+        existing = conn.execute(
+            f"SELECT id FROM tasks WHERE {column} = ?{exclusion} LIMIT 1", params
+        ).fetchone()
+        if existing:
+            raise ValueError(
+                f"{column} is already linked to Cortex task {existing['id']}"
+            )
+
+
+def add_task_dependency(
+    conn: sqlite3.Connection,
+    task_id: str,
+    depends_on_task_id: str,
+    *,
+    type: str = "blocks",
+    actor_name: str | None = None,
+    source: str = "cortex",
+) -> None:
+    if task_id == depends_on_task_id:
+        raise ValueError("task cannot depend on itself")
+    if type not in DEPENDENCY_TYPES:
+        raise ValueError(f"invalid dependency type: {type}")
+    task = get_task(conn, task_id)
+    upstream = get_task(conn, depends_on_task_id)
+    if task["project_id"] != upstream["project_id"]:
+        raise ValueError("dependency tasks must belong to the same project")
+    if _dependency_would_cycle(conn, task_id, depends_on_task_id):
+        raise ValueError("dependency would create a cycle")
+    conn.execute(
+        """INSERT INTO task_dependencies
+           (task_id, depends_on_task_id, type, created_at)
+           VALUES (?,?,?,?)
+           ON CONFLICT(task_id, depends_on_task_id) DO UPDATE SET type=excluded.type""",
+        (task_id, depends_on_task_id, type, ids.now()),
+    )
+    _insert_activity(
+        conn,
+        project_id=task["project_id"],
+        task_id=task_id,
+        actor_name=actor_name,
+        action="task.dependency_added",
+        summary=f"{task['title']} is blocked by {upstream['title']}",
+        source=source,
+        source_ref=depends_on_task_id,
+    )
     conn.commit()
+
+
+def list_task_dependencies(
+    conn: sqlite3.Connection, task_id: str | None = None
+) -> list[sqlite3.Row]:
+    where = "WHERE dependency.task_id = ?" if task_id else ""
+    params = (task_id,) if task_id else ()
+    return conn.execute(
+        f"""SELECT dependency.*, task.title AS task_title,
+                   upstream.title AS depends_on_title
+            FROM task_dependencies AS dependency
+            JOIN tasks AS task ON task.id = dependency.task_id
+            JOIN tasks AS upstream ON upstream.id = dependency.depends_on_task_id
+            {where}
+            ORDER BY dependency.created_at""",
+        params,
+    ).fetchall()
+
+
+def remove_task_dependency(
+    conn: sqlite3.Connection,
+    task_id: str,
+    depends_on_task_id: str,
+    *,
+    actor_name: str | None = None,
+    source: str = "cortex",
+) -> None:
+    task = get_task(conn, task_id)
+    upstream = get_task(conn, depends_on_task_id)
+    cursor = conn.execute(
+        "DELETE FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?",
+        (task_id, depends_on_task_id),
+    )
+    if cursor.rowcount == 0:
+        raise NotFound(f"dependency not found: {task_id} -> {depends_on_task_id}")
+    _insert_activity(
+        conn,
+        project_id=task["project_id"],
+        task_id=task_id,
+        actor_name=actor_name or "cortex",
+        action="task.dependency_removed",
+        summary=f"Removed blocker {upstream['title']} from {task['title']}",
+        source=source,
+        source_ref=depends_on_task_id,
+    )
+    conn.commit()
+
+
+def start_pm_session(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    title: str,
+    task_id: str | None = None,
+    owner: str = "codex",
+    acceptance: str | None = None,
+    next_action: str | None = None,
+    codex_thread_id: str | None = None,
+    source: str = "codex-pm",
+) -> tuple[str, str]:
+    session_id = ids.short_id()
+    try:
+        if task_id:
+            task = get_task(conn, task_id)
+            if task["project_id"] != project_id:
+                raise ValueError("PM task must belong to the selected project")
+            updates: dict[str, Any] = {
+                "status": "running", "assignee": owner,
+                "pm_session_id": session_id,
+                "blocked_reason": None,
+            }
+            if acceptance is not None:
+                updates["acceptance"] = acceptance
+            if next_action is not None:
+                updates["next_action"] = next_action
+            if codex_thread_id is not None:
+                updates["codex_thread_id"] = codex_thread_id
+            update_task(
+                conn, task_id, actor_type="agent", actor_name=owner, source=source,
+                commit=False, **updates,
+            )
+        else:
+            task_id = create_task(
+                conn,
+                project_id=project_id,
+                title=title,
+                type="planning",
+                acceptance=acceptance,
+                next_action=next_action,
+                codex_thread_id=codex_thread_id,
+                pm_session_id=session_id,
+                assignee=owner,
+                actor_type="agent",
+                actor_name=owner,
+                source=source,
+                commit=False,
+            )
+            update_task(
+                conn, task_id, status="running", actor_type="agent", actor_name=owner,
+                source=source, commit=False,
+            )
+        create_activity_event(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            actor_type="agent",
+            actor_name=owner,
+            action="pm.session_started",
+            summary=f"PM session started: {title}",
+            source=source,
+            source_ref=codex_thread_id or task_id,
+            session_id=session_id,
+            commit=False,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return task_id, session_id
+
+
+def close_pm_session(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    status: str,
+    summary: str,
+    owner: str = "codex",
+    next_action: str | None = None,
+    evidence: Any = None,
+    source: str = "codex-pm",
+    session_id: str | None = None,
+) -> str:
+    if status not in {"done", "review", "blocked", "in_progress"}:
+        raise ValueError("PM close status must be done, review, blocked, or in_progress")
+    task = get_task(conn, task_id)
+    updates: dict[str, Any] = {"status": status}
+    if next_action is not None:
+        updates["next_action"] = next_action
+    if status == "blocked" and summary:
+        updates["blocked_reason"] = summary
+    session_id = session_id or task["pm_session_id"] or ids.short_id()
+    try:
+        update_task(
+            conn, task_id, actor_type="agent", actor_name=owner, source=source,
+            commit=False, **updates,
+        )
+        create_activity_event(
+            conn,
+            project_id=task["project_id"],
+            task_id=task_id,
+            actor_type="agent",
+            actor_name=owner,
+            action="pm.session_closed",
+            summary=summary,
+            source=source,
+            source_ref=task["codex_thread_id"] or task_id,
+            session_id=session_id,
+            evidence=evidence,
+            commit=False,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return session_id
 
 
 # ------------------------------------------------------------ suggestions ---
@@ -378,6 +995,17 @@ def create_run(
             git_before, captured_via, "unknown", effort,
         ),
     )
+    _insert_activity(
+        conn,
+        project_id=project_id,
+        task_id=task_id,
+        actor_name=str(model or "").split(":")[0] or None,
+        model=model,
+        action="run.started",
+        summary=f"Started execution with {model or 'default model'}",
+        source="cortex-run",
+        source_ref=rid,
+    )
     conn.commit()
     return rid
 
@@ -392,12 +1020,33 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row:
 def update_run(conn: sqlite3.Connection, run_id: str, **fields: Any) -> None:
     if not fields:
         return
+    current = get_run(conn, run_id)
     if "files_changed" in fields and not isinstance(fields["files_changed"], str):
         fields["files_changed"] = json.dumps(fields["files_changed"])
     cols = ", ".join(f"{k} = ?" for k in fields)
     conn.execute(
         f"UPDATE runs SET {cols} WHERE id = ?", (*fields.values(), run_id)
     )
+    if fields.get("ended_at") and not current["ended_at"]:
+        exit_code = fields.get("exit_code")
+        outcome = fields.get("outcome") or current["outcome"]
+        summary = "Execution completed"
+        if exit_code not in {None, 0}:
+            summary = f"Execution failed with exit code {exit_code}"
+        elif outcome and outcome != "unknown":
+            summary = f"Execution completed: {outcome}"
+        _insert_activity(
+            conn,
+            project_id=current["project_id"],
+            task_id=current["task_id"],
+            actor_name=str(current["model"] or "").split(":")[0] or None,
+            model=current["model"],
+            action="run.completed",
+            summary=summary,
+            source="cortex-run",
+            source_ref=run_id,
+            evidence={"exit_code": exit_code, "outcome": outcome},
+        )
     conn.commit()
 
 
@@ -434,6 +1083,17 @@ def create_decision(
         """INSERT INTO decisions (id, project_id, ts, decision, rationale, source)
            VALUES (?,?,?,?,?,?)""",
         (did, project_id, ids.now(), decision, rationale, source),
+    )
+    _insert_activity(
+        conn,
+        project_id=project_id,
+        actor_type="human" if source == "manual" else "agent",
+        actor_name=source,
+        action="decision.recorded",
+        summary=decision,
+        source=source,
+        source_ref=did,
+        evidence={"rationale": rationale} if rationale else None,
     )
     conn.commit()
     return did

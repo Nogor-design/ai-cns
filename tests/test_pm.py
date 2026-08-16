@@ -125,3 +125,20 @@ def test_focus_treats_owner_assignment_as_human_attention(conn, project):
     assert focus["focus"]["kind"] == "decision"
     assert focus["needs_decision_ids"] == [task_id]
     assert focus["working_ids"] == []
+
+
+def test_focus_does_not_offer_work_with_an_unfinished_dependency(conn, project):
+    upstream = store.create_task(
+        conn, project_id=project["id"], title="Prepare inputs", type="planning"
+    )
+    downstream = store.create_task(
+        conn, project_id=project["id"], title="Build output", type="code"
+    )
+    store.add_task_dependency(conn, downstream, upstream)
+    focus = pm.portfolio_focus(conn)
+    assert upstream in focus["ready_task_ids"]
+    assert downstream not in focus["ready_task_ids"]
+
+    store.update_task(conn, upstream, status="done")
+    focus = pm.portfolio_focus(conn)
+    assert downstream in focus["ready_task_ids"]

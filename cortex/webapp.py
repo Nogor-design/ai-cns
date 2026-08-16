@@ -8,8 +8,10 @@ frontend is a management surface over the same records used by the CLI.
 from __future__ import annotations
 
 import json
+import hmac
 import mimetypes
 import os
+import secrets
 import sqlite3
 import threading
 import webbrowser
@@ -21,24 +23,197 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
-    config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy, routing,
-    runlog, store, team, workers,
+    codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
+    project_registration, project_removal,
+    github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
 )
 
 WORKER_NAMES = ("codex", "claude", "gemini", "grok", "ollama", "perplexity")
 ACTIVE_TASK_STATUSES = {"open", "assigned", "in_progress", "running", "review", "blocked"}
+ROADMAP_TASK_FIELDS = (
+    "id", "project_id", "project_name", "project_program", "project_status",
+    "title", "status", "priority", "assignee", "milestone", "progress",
+    "start_at", "target_at", "due_at", "created_at", "updated_at",
+    "completed_at", "blocked_reason", "next_action", "parent_id",
+)
+# Stable GitHub node IDs and ``sync_state`` are verified adapter evidence. They
+# are intentionally absent here so a dashboard form cannot forge concurrency
+# history or suppress the mirror planner's conflict detection.
 TASK_MUTABLE_FIELDS = {
     "title", "type", "status", "brief", "risk", "complexity", "acceptance",
     "allowed_paths", "budget", "priority", "assignee", "requested_model", "effort", "due_at",
+    "parent_id", "milestone", "start_at", "target_at", "progress",
+    "blocked_reason", "next_action", "github_issue_url", "codex_thread_id",
 }
 PROJECT_MUTABLE_FIELDS = {
     "status", "program", "priority", "privacy", "state_mode", "current_goal",
-    "test_command", "allowed_workers",
+    "test_command", "allowed_workers", "remote_url", "github_owner", "github_repo",
+    "codex_project_id",
 }
 
 
 def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
+
+
+def _activity_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = _row_dict(row)
+    if item.get("evidence_json"):
+        try:
+            item["evidence"] = json.loads(item["evidence_json"])
+        except (TypeError, json.JSONDecodeError):
+            item["evidence"] = item["evidence_json"]
+    else:
+        item["evidence"] = None
+    return item
+
+
+def _mirror_operation_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = _row_dict(row)
+    for source, target in (
+        ("actions_json", "actions"),
+        ("completed_actions_json", "completed_actions"),
+        ("evidence_json", "evidence"),
+    ):
+        value = item.get(source)
+        if value:
+            try:
+                item[target] = json.loads(value)
+            except (TypeError, json.JSONDecodeError):
+                item[target] = None
+        else:
+            item[target] = [] if target != "evidence" else None
+    return item
+
+
+def _mirror_apply_command(task_id: str, fingerprint: str, operation_id: str) -> str:
+    return (
+        f".\\scripts\\cortex-portfolio.ps1 github apply {task_id} "
+        f"--approve {fingerprint} --operation-id {operation_id}"
+    )
+
+
+def github_mirror_preview(
+    conn: sqlite3.Connection, task_id: str
+) -> dict[str, Any]:
+    """Build an explicit-click, read-only GitHub mirror readiness preview."""
+    task = store.get_task(conn, task_id)
+    project = store.get_project(conn, task["project_id"])
+    latest_row = store.latest_github_mirror_operation(conn, task["id"])
+    latest = _mirror_operation_dict(latest_row)
+    owner = project["github_project_owner"]
+    number = project["github_project_number"]
+    base: dict[str, Any] = {
+        "mode": "read_only_preview",
+        "task_id": task["id"],
+        "project_id": project["id"],
+        "can_apply": False,
+        "dashboard_apply_enabled": False,
+        "target": None,
+        "issue": {
+            "id": task["github_issue_id"],
+            "number": task["github_issue_number"],
+            "url": task["github_issue_url"],
+        },
+        "plan": None,
+        "operation": latest,
+        "command": None,
+        "command_kind": None,
+        "note": (
+            "This on-demand preview only reads GitHub. The dashboard cannot apply "
+            "the plan; copying a command does not run it."
+        ),
+    }
+    if not owner or number is None or not project["github_project_id"]:
+        base.update(
+            status="unconfigured",
+            summary="This Cortex project has no verified GitHub Project target.",
+        )
+        return base
+    base["target"] = {
+        "owner": str(owner),
+        "number": int(number),
+        "project_id": project["github_project_id"],
+        "title": None,
+    }
+    if not task["github_issue_id"]:
+        base.update(
+            status="unlinked",
+            summary="Link one explicit existing GitHub issue before planning a mirror update.",
+        )
+        return base
+
+    recoverable = latest and latest["status"] in {"applying", "interrupted"}
+    try:
+        plan, snapshot = github_adapter.prepare(task, str(owner), int(number))
+    except (github_reader.GitHubProjectError, github_adapter.MirrorApplyError) as exc:
+        if not recoverable:
+            raise
+        base.update(
+            status="recoverable",
+            summary=(
+                f"Mirror operation {latest['operation_id']} can be resumed, but the "
+                "fresh GitHub read is currently unavailable."
+            ),
+            command=_mirror_apply_command(
+                task["id"], latest["plan_fingerprint"], latest["operation_id"]
+            ),
+            command_kind="resume",
+            read_error=str(exc),
+        )
+        return base
+    if snapshot["project_id"] != project["github_project_id"]:
+        raise ValueError("configured GitHub Project node ID changed")
+    base["target"]["title"] = snapshot.get("project_title")
+    base["plan"] = plan.as_dict()
+    remote_item = next(
+        (
+            item for item in snapshot.get("items", [])
+            if item.get("content_id") == task["github_issue_id"]
+        ),
+        None,
+    )
+    if remote_item:
+        content = remote_item.get("content") or {}
+        base["issue"].update(
+            title=content.get("title"),
+            state=content.get("state"),
+            url=content.get("url") or task["github_issue_url"],
+        )
+
+    if recoverable:
+        base.update(
+            status="recoverable",
+            summary=(
+                f"Mirror operation {latest['operation_id']} can be safely resumed "
+                "with its original approval."
+            ),
+            command=_mirror_apply_command(
+                task["id"], latest["plan_fingerprint"], latest["operation_id"]
+            ),
+            command_kind="resume",
+        )
+    elif not plan.safe_to_apply:
+        base.update(
+            status="conflict",
+            summary="GitHub or Cortex evidence changed; review the conflicts before applying.",
+        )
+    elif plan.actions:
+        operation_id = github_adapter.suggested_operation_id(plan.fingerprint)
+        base.update(
+            status="actions_required",
+            summary=f"{len(plan.actions)} verified mirror action(s) are ready for CLI approval.",
+            command=_mirror_apply_command(task["id"], plan.fingerprint, operation_id),
+            command_kind="apply",
+        )
+    else:
+        base.update(
+            status="converged",
+            summary="Cortex and the linked GitHub Project item are already in sync.",
+        )
+    return base
 
 
 def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -53,9 +228,13 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         )
     }
     git_checks = {row["project_id"]: _row_dict(row) for row in store.list_git_checks(conn)}
-    task_rows = [
-        row for row in store.list_all_tasks(conn, include_done=False)
+    all_task_rows = [
+        row for row in store.list_all_tasks(conn, include_done=True)
         if row["project_id"] in projects_by_id
+    ]
+    task_rows = [
+        row for row in all_task_rows
+        if row["status"] not in {"done", "abandoned"}
     ]
     suggestion_rows = [
         row for row in store.list_suggestions(conn, status="proposed")
@@ -83,6 +262,39 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         run_payloads.append(item)
         latest_run_by_task.setdefault(run["task_id"], item)
 
+    dependency_rows = store.list_task_dependencies(conn)
+    dependencies_by_task: dict[str, list[dict[str, Any]]] = {}
+    for dependency in dependency_rows:
+        item = _row_dict(dependency)
+        dependencies_by_task.setdefault(dependency["task_id"], []).append(item)
+
+    task_statuses = {row["id"]: row["status"] for row in all_task_rows}
+    roadmap_payloads: list[dict[str, Any]] = []
+    for task in all_task_rows:
+        item = {field: task[field] for field in ROADMAP_TASK_FIELDS}
+        item["dependencies"] = []
+        for dependency in dependencies_by_task.get(task["id"], []):
+            upstream_status = task_statuses.get(dependency["depends_on_task_id"])
+            item["dependencies"].append({
+                "task_id": dependency["task_id"],
+                "depends_on_task_id": dependency["depends_on_task_id"],
+                "depends_on_title": dependency["depends_on_title"],
+                "depends_on_status": upstream_status,
+                "type": dependency["type"],
+                "satisfied": upstream_status in {"done", "abandoned"},
+            })
+        roadmap_payloads.append(item)
+
+    activity_payloads = [
+        _activity_dict(event)
+        for event in (
+            list(store.list_activity_events(conn, limit=100))
+            + list(project_removal.list_activity(conn, limit=100))
+        )
+    ]
+    activity_payloads.sort(key=lambda event: event["occurred_at"], reverse=True)
+    activity_payloads = activity_payloads[:100]
+
     task_payloads: list[dict[str, Any]] = []
     project_task_index: dict[str, list[dict[str, Any]]] = {
         row["id"]: [] for row in project_rows
@@ -106,8 +318,9 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         item["execution_model"] = task["requested_model"] or effective.model
         item["execution_effort"] = task["effort"] or effective.effort
         item["policy_note"] = effective.policy_note
-        item["blocked_reason"] = effective.blocked_reason
+        item["policy_blocked_reason"] = effective.blocked_reason
         item["latest_run"] = latest_run_by_task.get(task["id"])
+        item["dependencies"] = dependencies_by_task.get(task["id"], [])
         task_payloads.append(item)
         project_task_index[task["project_id"]].append(item)
         if task["assignee"]:
@@ -132,6 +345,10 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             stack=project["stack"],
             test_command=project["test_command"],
             updated_at=project["updated_at"],
+            remote_url=project["remote_url"],
+            github_owner=project["github_owner"],
+            github_repo=project["github_repo"],
+            codex_project_id=project["codex_project_id"],
             allowed_workers=list(policy.allowed_workers(project)),
             allowlist_configured=policy.is_configured(project),
         )
@@ -255,8 +472,11 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "summary": summary,
         "projects": project_payloads,
         "tasks": task_payloads,
+        "roadmap_tasks": roadmap_payloads,
         "suggestions": suggestion_payloads,
         "runs": run_payloads,
+        "activity": activity_payloads,
+        "dependencies": [_row_dict(row) for row in dependency_rows],
         "workers": worker_payloads,
         "team": expert_payloads,
         "usage": usage,
@@ -290,6 +510,7 @@ class CortexDashboardServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.database_path = database_path
         self.static_root = static_root
+        self.action_token = secrets.token_urlsafe(32)
         with db.connect(database_path) as conn:
             interrupted = jobs.reconcile(conn)
         if interrupted:
@@ -350,7 +571,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/portfolio":
             with db.connect(self.server.database_path) as conn:
-                self._json(HTTPStatus.OK, portfolio_payload(conn))
+                payload = portfolio_payload(conn)
+                payload["action_token"] = self.server.action_token
+                self._json(HTTPStatus.OK, payload)
+            return
+        if path == "/api/activity":
+            params = parse_qs(urlparse(self.path).query)
+            project = params.get("project", [None])[0]
+            task_id = params.get("task", [None])[0]
+            session_id = params.get("session", [None])[0]
+            try:
+                limit = max(1, min(500, int(params.get("limit", ["100"])[0])))
+            except ValueError:
+                limit = 100
+            with db.connect(self.server.database_path) as conn:
+                project_id = None
+                if project:
+                    try:
+                        project_id = store.get_project(conn, project)["id"]
+                    except store.NotFound as exc:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                        return
+                events = store.list_activity_events(
+                    conn,
+                    project_id,
+                    task_id=task_id,
+                    session_id=session_id,
+                    limit=limit,
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    {"activity": [_activity_dict(event) for event in events]},
+                )
             return
         if path == "/api/health":
             self._json(HTTPStatus.OK, {"ok": True, "database": str(self.server.database_path)})
@@ -410,6 +662,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parts = [part for part in path.split("/") if part]
         try:
             body = self._body()
+            if path == "/api/projects/preview":
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_registration.preview(conn, body.get("repo_path"))
+                self._json(HTTPStatus.OK, {"preview": payload})
+                return
+            if path == "/api/projects":
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    result = project_registration.register(conn, body)
+                    project = _row_dict(result.pop("project"))
+                self._json(HTTPStatus.CREATED, {"project": project, **result})
+                return
+            if (
+                len(parts) == 4
+                and parts[:2] == ["api", "projects"]
+                and parts[3] == "removal-preview"
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_removal.preview(conn, parts[2])
+                self._json(HTTPStatus.OK, {"preview": payload})
+                return
             if path == "/api/continue":
                 project_id = body.get("project_id")
                 with db.connect(self.server.database_path) as conn:
@@ -484,6 +762,70 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 self._json(HTTPStatus.ACCEPTED, {"task_id": task_id, "job_id": job_id})
                 return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "tasks"]
+                and parts[3:] == ["github", "preview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = github_mirror_preview(conn, parts[2])
+                self._json(HTTPStatus.OK, payload)
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "tasks"]
+                and parts[3:] == ["codex", "preview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    task = store.get_task(conn, parts[2])
+                    project = store.get_project(conn, task["project_id"])
+                    if not policy.is_allowed(project, "codex"):
+                        raise ValueError("Codex is not allowed to read this project")
+                    if not task["acceptance"]:
+                        raise ValueError("add a done-when check before copying a Codex prompt")
+                    prompt = codex_app.launch_prompt(project, task)
+                    findings = secrets_scan.scan(prompt, use_ollama=False)
+                    if findings:
+                        kinds = ", ".join(sorted({finding.kind for finding in findings}))
+                        raise ValueError(f"Codex prompt blocked by local privacy scan: {kinds}")
+                    capability = codex_app.inspect(
+                        project["repo_path"], task["codex_thread_id"]
+                    )
+                    store.create_activity_event(
+                        conn,
+                        project_id=project["id"],
+                        task_id=task["id"],
+                        actor_type="human",
+                        actor_name="owner",
+                        action="codex.launch_previewed",
+                        summary=f"Previewed Codex handoff for {task['title']}",
+                        source="dashboard",
+                        source_ref=task["codex_thread_id"] or task["id"],
+                        session_id=task["pm_session_id"],
+                        evidence={
+                            "available": capability["available"],
+                            "linked_thread_found": capability["linked_thread_found"],
+                            "methods": capability["methods"],
+                        },
+                    )
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "task_id": task["id"],
+                        "codex_thread_id": task["codex_thread_id"],
+                        "prompt": prompt,
+                        "capability": capability,
+                        "mode": "copy_prompt",
+                        "start_enabled": False,
+                        "can_start_turn": False,
+                        "can_navigate": False,
+                    },
+                )
+                return
             if path != "/api/tasks":
                 self._json(HTTPStatus.NOT_FOUND, {"error": "route not found"})
                 return
@@ -504,7 +846,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     store.update_task(conn, task_id, status=body["status"])
                 task = _row_dict(store.get_task(conn, task_id))
             self._json(HTTPStatus.CREATED, {"task": task})
-        except (KeyError, TypeError, ValueError, store.NotFound) as exc:
+        except (
+            KeyError, TypeError, ValueError, OSError, sqlite3.IntegrityError, store.NotFound,
+            github_reader.GitHubProjectError, github_adapter.MirrorApplyError,
+        ) as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = unquote(urlparse(self.path).path)
+        parts = [part for part in path.split("/") if part]
+        if len(parts) != 3 or parts[:2] != ["api", "projects"]:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "route not found"})
+            return
+        if not self._allow_local_action():
+            return
+        try:
+            body = self._body()
+            with db.connect(self.server.database_path) as conn:
+                payload = project_removal.remove(
+                    conn,
+                    parts[2],
+                    confirm_name=body.get("confirm_name"),
+                    acknowledge_permanent=body.get("acknowledge_permanent"),
+                    actor_type="human",
+                    actor_name="owner",
+                    source="dashboard",
+                )
+            self._json(HTTPStatus.OK, {"removal": payload})
+        except (
+            TypeError, ValueError, OSError, sqlite3.IntegrityError, store.NotFound,
+        ) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
     def do_PATCH(self) -> None:  # noqa: N802
@@ -520,7 +891,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if kind == "tasks":
                     store.get_task(conn, item_id)
                     fields = {key: value for key, value in body.items() if key in TASK_MUTABLE_FIELDS}
-                    store.update_task(conn, item_id, **fields)
+                    store.update_task(
+                        conn,
+                        item_id,
+                        actor_type="human",
+                        actor_name="owner",
+                        source="dashboard",
+                        **fields,
+                    )
                     payload = {"task": _row_dict(store.get_task(conn, item_id))}
                 elif kind == "projects":
                     store.get_project(conn, item_id)
@@ -603,6 +981,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise TypeError("JSON body must be an object")
         return payload
+
+    def _allow_local_action(self) -> bool:
+        """Protect subprocess-backed actions from cross-site/browser requests."""
+        local_names = {"127.0.0.1", "localhost", "::1"}
+        host = urlparse(f"//{self.headers.get('Host', '')}").hostname
+        origin_header = self.headers.get("Origin")
+        origin = urlparse(origin_header).hostname if origin_header else None
+        supplied = self.headers.get("X-Cortex-Action-Token", "")
+        if host not in local_names or (origin is not None and origin not in local_names):
+            self._json(HTTPStatus.FORBIDDEN, {"error": "local dashboard origin required"})
+            return False
+        if not hmac.compare_digest(supplied, self.server.action_token):
+            self._json(HTTPStatus.FORBIDDEN, {"error": "invalid action token"})
+            return False
+        return True
 
     def _json(self, status: HTTPStatus, payload: Any) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

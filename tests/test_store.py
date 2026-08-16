@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from cortex import ids, store
@@ -89,3 +91,225 @@ def test_decisions(conn, project):
     )
     rows = store.recent_decisions(conn, project["id"])
     assert rows[0]["decision"] == "use sqlite"
+
+
+def test_pm_sessions_are_distinct_attributed_and_filterable(conn, project):
+    task_id = store.create_task(
+        conn, project_id=project["id"], title="Manage the slice", actor_name="owner",
+        blocked_reason="Waiting on approval",
+    )
+    _, first_session = store.start_pm_session(
+        conn, project_id=project["id"], task_id=task_id, title="First pass",
+        owner="codex", codex_thread_id="thread-1",
+    )
+    assert store.get_task(conn, task_id)["blocked_reason"] is None
+    store.create_activity_event(
+        conn,
+        project_id=project["id"],
+        task_id=task_id,
+        actor_type="agent",
+        actor_name="gemini",
+        action="delegation.completed",
+        summary="Reviewed the records schema",
+        session_id=first_session,
+        evidence="plain text is still encoded as JSON",
+    )
+    store.close_pm_session(
+        conn, task_id, status="in_progress", summary="First pass complete",
+        session_id=first_session,
+    )
+    _, second_session = store.start_pm_session(
+        conn, project_id=project["id"], task_id=task_id, title="Second pass",
+        owner="codex", codex_thread_id="thread-1",
+    )
+
+    assert first_session != second_session
+    first_events = store.list_activity_events(conn, session_id=first_session)
+    assert {row["action"] for row in first_events} >= {
+        "pm.session_started", "pm.session_closed", "delegation.completed",
+    }
+    delegated = next(row for row in first_events if row["action"] == "delegation.completed")
+    assert delegated["actor_name"] == "gemini"
+    assert json.loads(delegated["evidence_json"]) == "plain text is still encoded as JSON"
+
+
+def test_five_pm_sessions_across_three_projects_reconstruct_without_chat(conn, project):
+    project_ids = [project["id"]]
+    for number in (2, 3):
+        project_ids.append(store.create_project(
+            conn,
+            name=f"Portfolio Project {number}",
+            repo_path=f"C:/portfolio/project-{number}",
+        ))
+    sessions = []
+    for number in range(5):
+        project_id = project_ids[number % 3]
+        task_id, session_id = store.start_pm_session(
+            conn,
+            project_id=project_id,
+            title=f"PM slice {number + 1}",
+            owner="codex" if number % 2 == 0 else "gemini",
+            next_action=f"Advance slice {number + 1}",
+            codex_thread_id=f"thread-{number + 1}",
+        )
+        store.close_pm_session(
+            conn,
+            task_id,
+            status="done",
+            summary=f"Accepted slice {number + 1}",
+            session_id=session_id,
+        )
+        sessions.append((project_id, task_id, session_id))
+
+    assert len({session_id for _, _, session_id in sessions}) == 5
+    assert len({project_id for project_id, _, _ in sessions}) == 3
+    for project_id, task_id, session_id in sessions:
+        events = store.list_activity_events(
+            conn, project_id, task_id=task_id, session_id=session_id
+        )
+        assert {event["action"] for event in events} == {
+            "pm.session_closed", "pm.session_started",
+        }
+        assert all(event["actor_name"] for event in events)
+
+
+def test_pm_start_rolls_back_task_when_session_event_fails(conn, project, monkeypatch):
+    task_id = store.create_task(conn, project_id=project["id"], title="Atomic PM")
+    original = store._insert_activity
+
+    def fail_session_event(connection, **fields):
+        if fields.get("action") == "pm.session_started":
+            raise RuntimeError("simulated event failure")
+        return original(connection, **fields)
+
+    monkeypatch.setattr(store, "_insert_activity", fail_session_event)
+    with pytest.raises(RuntimeError, match="simulated"):
+        store.start_pm_session(
+            conn, project_id=project["id"], task_id=task_id, title="Must rollback"
+        )
+    task = store.get_task(conn, task_id)
+    assert task["status"] == "open"
+    assert task["pm_session_id"] is None
+
+
+def test_task_hierarchy_and_dependencies_reject_indirect_cycles(conn, project):
+    first = store.create_task(conn, project_id=project["id"], title="First")
+    second = store.create_task(
+        conn, project_id=project["id"], title="Second", parent_id=first
+    )
+    third = store.create_task(
+        conn, project_id=project["id"], title="Third", parent_id=second
+    )
+    with pytest.raises(ValueError, match="cycle"):
+        store.update_task(conn, first, parent_id=third)
+
+    store.add_task_dependency(conn, second, first)
+    store.add_task_dependency(conn, third, second)
+    with pytest.raises(ValueError, match="cycle"):
+        store.add_task_dependency(conn, first, third)
+    store.remove_task_dependency(conn, third, second)
+    assert store.list_task_dependencies(conn, third) == []
+    assert "task.dependency_removed" in {
+        row["action"] for row in store.list_activity_events(conn, task_id=third)
+    }
+
+
+def test_done_forces_full_progress_and_completion_time(conn, project):
+    task_id = store.create_task(
+        conn, project_id=project["id"], title="Finish me", progress=30
+    )
+    store.update_task(conn, task_id, status="done", progress=30)
+    task = store.get_task(conn, task_id)
+    assert task["progress"] == 100
+    assert task["completed_at"]
+
+
+def test_github_node_ids_can_only_link_to_one_cortex_task(conn, project):
+    first = store.create_task(
+        conn,
+        project_id=project["id"],
+        title="First linked task",
+        github_issue_id="I_same_issue",
+        github_project_item_id="PVTI_same_item",
+    )
+    with pytest.raises(ValueError, match="github_issue_id.*already linked"):
+        store.create_task(
+            conn,
+            project_id=project["id"],
+            title="Duplicate issue task",
+            github_issue_id="I_same_issue",
+        )
+
+    second = store.create_task(
+        conn, project_id=project["id"], title="Second unlinked task"
+    )
+    with pytest.raises(ValueError, match="github_project_item_id.*already linked"):
+        store.update_task(conn, second, github_project_item_id="PVTI_same_item")
+
+    store.update_task(conn, first, github_issue_id="I_same_issue")
+    assert store.get_task(conn, first)["github_issue_id"] == "I_same_issue"
+
+
+def test_github_mirror_operation_claim_is_durable_and_prevents_replay(conn, project):
+    task_id = store.create_task(
+        conn, project_id=project["id"], title="Mirror guarded task",
+        github_issue_id="I_guarded",
+    )
+    first, created = store.claim_github_mirror_operation(
+        conn,
+        operation_id="ghm-operation-1",
+        task_id=task_id,
+        project_id=project["id"],
+        plan_fingerprint="plan-v1:first",
+        github_project_id="PVT_1",
+        github_issue_id="I_guarded",
+        github_project_item_id="PVTI_1",
+        actor="codex",
+        session_id="pm-session",
+        actions=[{"kind": "set_project_field", "field": "Status"}],
+    )
+    assert created is True
+    assert first["status"] == "applying"
+
+    replay, created = store.claim_github_mirror_operation(
+        conn,
+        operation_id="ghm-operation-2",
+        task_id=task_id,
+        project_id=project["id"],
+        plan_fingerprint="plan-v1:first",
+        github_project_id="PVT_1",
+        github_issue_id="I_guarded",
+        github_project_item_id="PVTI_1",
+        actor="codex",
+        session_id="pm-session",
+        actions=[],
+    )
+    assert created is False
+    assert replay["operation_id"] == "ghm-operation-1"
+
+    with pytest.raises(ValueError, match="recoverable mirror operation"):
+        store.claim_github_mirror_operation(
+            conn,
+            operation_id="ghm-operation-3",
+            task_id=task_id,
+            project_id=project["id"],
+            plan_fingerprint="plan-v1:different",
+            github_project_id="PVT_1",
+            github_issue_id="I_guarded",
+            github_project_item_id="PVTI_1",
+            actor="codex",
+            session_id="pm-session",
+            actions=[],
+        )
+
+    store.update_github_mirror_operation(
+        conn,
+        "ghm-operation-1",
+        status="verified",
+        completed_actions=[{"index": 0}],
+        evidence={"verified": True},
+    )
+    completed = store.get_github_mirror_operation(conn, "ghm-operation-1")
+    assert completed["status"] == "verified"
+    assert json.loads(completed["completed_actions_json"]) == [{"index": 0}]
+    assert json.loads(completed["evidence_json"]) == {"verified": True}
