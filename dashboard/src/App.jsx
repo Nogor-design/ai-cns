@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertTriangle, Bot, Check, CheckCircle2, ChevronRight, CircleAlert,
+  Activity, AlertTriangle, Bot, CalendarRange, Check, CheckCircle2, ChevronRight, CircleAlert,
   CirclePlay, Clock3, Copy, Cpu, FolderGit2, GitBranch, Gauge, LayoutDashboard,
   Github, LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
   Search, ShieldCheck, Sparkles, UsersRound, UserRound, WandSparkles, X,
 } from 'lucide-react'
 import { filterAndGroupTimeline } from './timeline.js'
 import { mirrorActionLabel, mirrorStatusMeta } from './githubMirror.js'
+import RoadmapView from './RoadmapView.jsx'
 
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
@@ -17,7 +18,7 @@ const workers = {
 
 const navItems = [
   ['overview', 'Today', LayoutDashboard], ['projects', 'All projects', FolderGit2],
-  ['timeline', 'Timeline', Clock3],
+  ['roadmap', 'Roadmap', CalendarRange], ['timeline', 'Timeline', Clock3],
   ['paused', 'Paused / external', PauseCircle],
 ]
 const statuses = ['open', 'assigned', 'in_progress', 'running', 'review', 'blocked', 'done']
@@ -574,6 +575,17 @@ export default function App() {
   }
 
   async function updateTask(id, fields) { try { await request(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }); setToast('Task updated'); await load(true) } catch (err) { setError(err.message) } }
+  async function saveTaskSchedule(id, fields) {
+    try {
+      await request(`/api/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(fields) })
+      setToast('Local schedule updated')
+      await load(true)
+      return true
+    } catch (err) {
+      setError(err.message)
+      return false
+    }
+  }
   async function updateAllowlist(projectId, allowed) { try { await request(`/api/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify({ allowed_workers: allowed }) }); setToast(`Allowlist updated: ${allowed.join(', ')}`); await load(true) } catch (err) { setError(err.message) } }
   async function dismissSuggestion(id) { try { await request(`/api/suggestions/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'dismissed' }) }); setToast('Suggestion dismissed'); await load(true) } catch (err) { setError(err.message) } }
   async function keepTeamWorking() { try { const payload = await request('/api/team/keep-working', { method: 'POST', body: JSON.stringify({ limit: 3 }) }); if (!payload.job_ids.length) { setToast('No safe approved assignments are waiting; ask the PM to plan a project'); await load(true); return } watchJob(payload.job_ids[0], 'Starting team') } catch (err) { setError(err.message) } }
@@ -603,6 +615,7 @@ export default function App() {
 
   function changeNav(next) {
     if (next === 'timeline') setTimelineProjectId(null)
+    if (next === 'timeline' || next === 'roadmap') setSelectedId(null)
     setActiveNav(next)
   }
 
@@ -622,7 +635,7 @@ export default function App() {
       {error && <div className="error-banner"><CircleAlert size={15} /><span>{error}</span><button onClick={() => setError('')}><X size={14} /></button></div>}
       {(job || serverRunningJobs.length > 0) && <div className="job-banner"><LoaderCircle className="spin" size={16} /><span><strong>{job?.label || pretty(serverRunningJobs[0]?.kind || 'Worker')}</strong> is active. Execution activity below shows the worker and elapsed time.</span></div>}
       <div className="main-content">
-        {activeNav === 'timeline' ? <EvidenceTimeline runs={data.runs || []} activity={data.activity || []} project={timelineProject} onView={setSelectedRun} onClearProject={() => setTimelineProjectId(null)} /> : <>
+        {activeNav === 'timeline' ? <EvidenceTimeline runs={data.runs || []} activity={data.activity || []} project={timelineProject} onView={setSelectedRun} onClearProject={() => setTimelineProjectId(null)} /> : activeNav === 'roadmap' ? <RoadmapView tasks={data.roadmap_tasks || []} projects={data.projects || []} onSaveTask={saveTaskSchedule} /> : <>
           <Hero planner={planner} setPlanner={setPlanner} onContinue={continueWork} busy={Boolean(job) || serverRunningJobs.length > 0} onManual={() => setManualProject(null)} />
           <div className="summary-line"><span><strong>{data.summary.needs_decision}</strong> need you</span><span><strong>{data.summary.working}</strong> assigned / working</span><span><strong>{data.summary.recommendations}</strong> ready to approve</span><span><strong>{data.summary.active_projects}</strong> active projects</span><em>Plans are cached to conserve tokens</em></div>
           <TeamPanel team={data.team || []} onKeepWorking={keepTeamWorking} busy={Boolean(job) || serverRunningJobs.length > 0} />

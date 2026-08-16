@@ -159,6 +159,46 @@ def test_project_allowlist_can_be_updated_over_http(
     assert project["allowlist_configured"] is True
 
 
+def test_dashboard_schedule_patch_is_attributed_to_the_human_owner(
+    dashboard_server, isolated_db, tmp_path
+):
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Roadmap attribution", repo_path=str(tmp_path)
+        )
+        task_id = store.create_task(
+            conn, project_id=project_id, title="Schedule this work"
+        )
+
+    status, payload = request_json(
+        dashboard_server,
+        f"/api/tasks/{task_id}",
+        method="PATCH",
+        body={
+            "start_at": "2026-08-20",
+            "target_at": "2026-08-24",
+            "due_at": "2026-08-25",
+            "milestone": "Portfolio visibility",
+            "progress": 40,
+        },
+    )
+
+    assert status == 200
+    assert payload["task"]["start_at"] == "2026-08-20"
+    assert payload["task"]["target_at"] == "2026-08-24"
+    assert payload["task"]["due_at"] == "2026-08-25"
+    assert payload["task"]["milestone"] == "Portfolio visibility"
+    assert payload["task"]["progress"] == 40
+    with db.connect(isolated_db) as conn:
+        event = next(
+            row for row in store.list_activity_events(conn, task_id=task_id)
+            if row["action"] == "task.updated"
+        )
+    assert event["actor_type"] == "human"
+    assert event["actor_name"] == "owner"
+    assert event["source"] == "dashboard"
+
+
 def test_adapter_owned_github_evidence_cannot_be_forged_over_http(
     dashboard_server, isolated_db, tmp_path
 ):

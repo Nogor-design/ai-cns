@@ -98,6 +98,15 @@ build; later launches go straight to `http://127.0.0.1:8765`. Use `-Rebuild`
 after changing frontend source, `-NoOpen` to suppress browser launch, or a
 different local port with `-Port 8877`.
 
+Open **Roadmap** for the portfolio schedule. It uses one shared Gantt-style
+time axis while keeping three kinds of evidence explicit: planned bars come
+only from recorded start/target/due dates, completed bars show the observed
+created-to-completed lifecycle, and work without usable dates stays in the
+off-axis queue. Filters cover one project or the active/recent/all portfolio;
+each row shows worker, milestone, progress, status, and dependency blockers.
+Click a row to edit its local schedule record. Those edits do not start an AI
+worker, contact GitHub, or claim that Cortex has calculated a critical path.
+
 The intended daily workflow is deliberately short:
 
 1. Start in **Your expert team**. Each CLI has a specialist role, current or

@@ -29,6 +29,12 @@ from . import (
 
 WORKER_NAMES = ("codex", "claude", "gemini", "grok", "ollama", "perplexity")
 ACTIVE_TASK_STATUSES = {"open", "assigned", "in_progress", "running", "review", "blocked"}
+ROADMAP_TASK_FIELDS = (
+    "id", "project_id", "project_name", "project_program", "project_status",
+    "title", "status", "priority", "assignee", "milestone", "progress",
+    "start_at", "target_at", "due_at", "created_at", "updated_at",
+    "completed_at", "blocked_reason", "next_action", "parent_id",
+)
 # Stable GitHub node IDs and ``sync_state`` are verified adapter evidence. They
 # are intentionally absent here so a dashboard form cannot forge concurrency
 # history or suppress the mirror planner's conflict detection.
@@ -221,9 +227,13 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         )
     }
     git_checks = {row["project_id"]: _row_dict(row) for row in store.list_git_checks(conn)}
-    task_rows = [
-        row for row in store.list_all_tasks(conn, include_done=False)
+    all_task_rows = [
+        row for row in store.list_all_tasks(conn, include_done=True)
         if row["project_id"] in projects_by_id
+    ]
+    task_rows = [
+        row for row in all_task_rows
+        if row["status"] not in {"done", "abandoned"}
     ]
     suggestion_rows = [
         row for row in store.list_suggestions(conn, status="proposed")
@@ -256,6 +266,23 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     for dependency in dependency_rows:
         item = _row_dict(dependency)
         dependencies_by_task.setdefault(dependency["task_id"], []).append(item)
+
+    task_statuses = {row["id"]: row["status"] for row in all_task_rows}
+    roadmap_payloads: list[dict[str, Any]] = []
+    for task in all_task_rows:
+        item = {field: task[field] for field in ROADMAP_TASK_FIELDS}
+        item["dependencies"] = []
+        for dependency in dependencies_by_task.get(task["id"], []):
+            upstream_status = task_statuses.get(dependency["depends_on_task_id"])
+            item["dependencies"].append({
+                "task_id": dependency["task_id"],
+                "depends_on_task_id": dependency["depends_on_task_id"],
+                "depends_on_title": dependency["depends_on_title"],
+                "depends_on_status": upstream_status,
+                "type": dependency["type"],
+                "satisfied": upstream_status in {"done", "abandoned"},
+            })
+        roadmap_payloads.append(item)
 
     activity_payloads = [
         _activity_dict(event) for event in store.list_activity_events(conn, limit=100)
@@ -438,6 +465,7 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "summary": summary,
         "projects": project_payloads,
         "tasks": task_payloads,
+        "roadmap_tasks": roadmap_payloads,
         "suggestions": suggestion_payloads,
         "runs": run_payloads,
         "activity": activity_payloads,
@@ -804,7 +832,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if kind == "tasks":
                     store.get_task(conn, item_id)
                     fields = {key: value for key, value in body.items() if key in TASK_MUTABLE_FIELDS}
-                    store.update_task(conn, item_id, **fields)
+                    store.update_task(
+                        conn,
+                        item_id,
+                        actor_type="human",
+                        actor_name="owner",
+                        source="dashboard",
+                        **fields,
+                    )
                     payload = {"task": _row_dict(store.get_task(conn, item_id))}
                 elif kind == "projects":
                     store.get_project(conn, item_id)
