@@ -127,6 +127,19 @@ def get_github_mirror_operation(
     return row
 
 
+def latest_github_mirror_operation(
+    conn: sqlite3.Connection, task_id: str
+) -> sqlite3.Row | None:
+    """Return the newest durable mirror attempt for one task, if any."""
+    return conn.execute(
+        """SELECT * FROM github_mirror_operations
+           WHERE task_id = ?
+           ORDER BY created_at DESC, operation_id DESC
+           LIMIT 1""",
+        (task_id,),
+    ).fetchone()
+
+
 def claim_github_mirror_operation(
     conn: sqlite3.Connection,
     *,

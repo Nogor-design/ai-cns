@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, Bot, Check, CheckCircle2, ChevronRight, CircleAlert,
   CirclePlay, Clock3, Copy, Cpu, FolderGit2, GitBranch, Gauge, LayoutDashboard,
-  LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
-  Search, Sparkles, UsersRound, UserRound, WandSparkles, X,
+  Github, LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
+  Search, ShieldCheck, Sparkles, UsersRound, UserRound, WandSparkles, X,
 } from 'lucide-react'
 import { filterAndGroupTimeline } from './timeline.js'
+import { mirrorActionLabel, mirrorStatusMeta } from './githubMirror.js'
 
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
@@ -399,21 +400,21 @@ function WorkerAllowlist({ project, onChange }) {
   </section>
 }
 
-function DrawerTask({ task, onTaskUpdate, onStart, onCodex }) {
+function DrawerTask({ task, onTaskUpdate, onStart, onCodex, onGithub }) {
   return <div className="drawer-task"><div><strong>{task.title}</strong><span><StatusPill value={task.status} /><WorkerBadge name={task.execution_worker} /></span><small>{task.execution_model || 'default model'} · {task.execution_effort || 'auto'} effort</small></div>
-    <button type="button" className="task-codex-action" onClick={() => onCodex(task)}><Copy size={14} />{task.codex_thread_id ? 'Copy continuation prompt' : 'Copy Codex prompt'}</button>
+    <div className="task-safe-actions"><button type="button" className="task-codex-action" onClick={() => onCodex(task)}><Copy size={14} />{task.codex_thread_id ? 'Copy continuation prompt' : 'Copy Codex prompt'}</button><button type="button" className="task-github-action" onClick={() => onGithub(task)}><Github size={14} />Check GitHub mirror</button></div>
     <div>{task.status === 'assigned' && !['owner', 'perplexity'].includes(String(task.assignee || '').toLowerCase()) && <button onClick={() => onStart(task)}><CirclePlay size={14} />Start</button>}<select aria-label="Model" value={task.requested_model || ''} onChange={event => onTaskUpdate(task.id, { requested_model: event.target.value || null })}><option value="">Auto model</option><option value="grok-4.5">grok-4.5</option><option value="sonnet">Claude Sonnet</option><option value="opus">Claude Opus</option></select><select aria-label="Effort" value={task.effort || ''} onChange={event => onTaskUpdate(task.id, { effort: event.target.value || null })}><option value="">Auto effort</option>{['low', 'medium', 'high', 'xhigh'].map(value => <option key={value}>{value}</option>)}</select><select aria-label="Status" value={task.status} onChange={event => onTaskUpdate(task.id, { status: event.target.value })}>{statuses.map(status => <option key={status} value={status}>{pretty(status)}</option>)}</select></div>
   </div>
 }
 
-function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist, onTimeline, onCodex }) {
+function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist, onTimeline, onCodex, onGithub }) {
   if (!project) return null
   return <aside className="drawer"><div className="drawer-head"><div><span className="project-monogram large" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span><span><small>{project.program}</small><h2>{project.name}</h2></span></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <div className="drawer-primary"><button onClick={() => onPlan(project.project_id, 'codex')}><Sparkles size={16} />Ask Codex to plan next</button><button onClick={() => onPlan(project.project_id, 'ollama')}><Cpu size={16} />Use local planner</button></div>
     <section><label>Current goal</label><p>{project.current_goal || 'No goal has been set.'}</p></section>
     <section className="drawer-evidence"><label>Repository evidence</label><div><GitBranch size={14} />{project.branch || 'Not under Git'}<span>{gitLabel(project)}</span></div>{project.warnings?.[0] && <small><AlertTriangle size={13} />{project.warnings[0]}</small>}<button type="button" className="drawer-timeline-action" onClick={() => onTimeline(project.project_id)}><Clock3 size={14} />View project timeline</button></section>
     <WorkerAllowlist project={project} onChange={onAllowlist} />
-    <section><div className="drawer-section-head"><label>Active work ({project.tasks.length})</label><button onClick={() => onManual(project.project_id)}><Plus size={13} />Manual</button></div><div className="drawer-task-list">{project.tasks.map(task => <DrawerTask key={task.id} task={task} onTaskUpdate={onTaskUpdate} onStart={onStart} onCodex={onCodex} />)}{!project.tasks.length && <div className="lane-empty">No active tasks.</div>}</div></section>
+    <section><div className="drawer-section-head"><label>Active work ({project.tasks.length})</label><button onClick={() => onManual(project.project_id)}><Plus size={13} />Manual</button></div><div className="drawer-task-list">{project.tasks.map(task => <DrawerTask key={task.id} task={task} onTaskUpdate={onTaskUpdate} onStart={onStart} onCodex={onCodex} onGithub={onGithub} />)}{!project.tasks.length && <div className="lane-empty">No active tasks.</div>}</div></section>
     <div className="drawer-path"><FolderGit2 size={14} /><span title={project.repo_path}>{project.repo_path}</span></div>
   </aside>
 }
@@ -438,6 +439,32 @@ function CodexLaunchModal({ launch, onClose, onCopied }) {
   </section></div>
 }
 
+function GitHubMirrorModal({ launch, onClose, onCopied }) {
+  const [copied, setCopied] = useState(false)
+  if (!launch) return null
+  const payload = launch.payload
+  const meta = mirrorStatusMeta(payload?.status)
+  const plan = payload?.plan
+  const operation = payload?.operation
+  async function copyCommand() {
+    await navigator.clipboard.writeText(payload.command)
+    setCopied(true)
+    onCopied(payload.command_kind)
+  }
+  return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}><section className="github-mirror-modal" aria-labelledby="github-mirror-title">
+    <div className="modal-head"><div><span className="eyebrow">On-demand GitHub check</span><h2 id="github-mirror-title">GitHub mirror readiness</h2><p>{launch.task.title}</p></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></div>
+    {launch.loading ? <div className="github-mirror-loading" role="status"><LoaderCircle className="spin" size={18} />Reading every Project, item, field, and value page…</div> : <>
+      <div className={`github-mirror-status ${meta.tone}`}><span>{meta.tone === 'ready' ? <CheckCircle2 size={17} /> : meta.tone === 'danger' ? <CircleAlert size={17} /> : <ShieldCheck size={17} />}<strong>{meta.label}</strong></span><small>{payload.summary}</small></div>
+      <div className="github-mirror-facts"><span><small>Target</small><strong>{payload.target ? `${payload.target.title || payload.target.owner} · Project #${payload.target.number}` : 'Not configured'}</strong>{payload.target?.project_id && <code>{payload.target.project_id}</code>}</span><span><small>Linked issue</small><strong>{payload.issue?.number ? `#${payload.issue.number}${payload.issue.title ? ` · ${payload.issue.title}` : ''}` : 'Not linked'}</strong>{payload.issue?.url && <a href={payload.issue.url} target="_blank" rel="noreferrer">Open issue</a>}</span><span><small>Project item</small><strong>{plan?.project_item_id || operation?.github_project_item_id || 'Not recorded'}</strong></span></div>
+      {plan && <div className="github-plan-evidence"><div><span><small>Fresh plan fingerprint</small><code>{plan.fingerprint}</code></span><span><small>Snapshot digest</small><code>{plan.snapshot_digest}</code></span></div>{plan.actions.length > 0 && <section><h3>Planned actions ({plan.actions.length})</h3><ul>{plan.actions.map((action, index) => <li key={`${action.kind}-${action.field || index}`}><strong>{mirrorActionLabel(action)}</strong><span>{action.reason}</span></li>)}</ul></section>}{plan.conflicts.length > 0 && <section className="github-conflicts"><h3>Conflicts ({plan.conflicts.length})</h3><ul>{plan.conflicts.map(conflict => <li key={conflict.code}><strong>{pretty(conflict.code)}</strong><span>{conflict.summary}</span></li>)}</ul></section>}</div>}
+      {operation && <div className={`github-operation ${['applying', 'interrupted'].includes(operation.status) ? 'recoverable' : ''}`}><span><small>Latest durable operation</small><strong>{operation.operation_id} · {pretty(operation.status)}</strong></span><span><small>Verified steps</small><strong>{operation.completed_actions?.length || 0} / {operation.actions?.length || 0}</strong></span>{operation.error && <p>{operation.error}</p>}{payload.read_error && <p>Fresh read: {payload.read_error}</p>}</div>}
+      {payload.command && <label className="github-command-label">Exact {payload.command_kind === 'resume' ? 'recovery' : 'approved apply'} command<textarea aria-label="GitHub mirror CLI command" readOnly rows="3" value={payload.command} /></label>}
+      <div className="codex-launch-note"><AlertTriangle size={15} /><span>{payload.note} Review the fingerprint and actions before running any copied command in PowerShell.</span></div>
+      <div className="modal-actions"><button type="button" onClick={onClose}>Close</button>{payload.command && <button type="button" className="primary" onClick={copyCommand}><Copy size={14} />{copied ? 'Copied' : payload.command_kind === 'resume' ? 'Copy recovery command' : 'Copy apply command'}</button>}</div>
+    </>}
+  </section></div>
+}
+
 function ManualTaskModal({ projects, initialProject, onClose, onCreated }) {
   const choices = projects.filter(project => project.status === 'active')
   const [form, setForm] = useState({ project_id: initialProject || choices[0]?.project_id || '', title: '', type: 'review', acceptance: '' })
@@ -455,6 +482,7 @@ export default function App() {
   const [selectedRun, setSelectedRun] = useState(null)
   const [timelineProjectId, setTimelineProjectId] = useState(null)
   const [codexLaunch, setCodexLaunch] = useState(null)
+  const [githubLaunch, setGithubLaunch] = useState(null)
   const pollRef = useRef(null)
 
   async function load(silent = false) { if (!silent) setError(''); try { const [portfolio, jobPayload] = await Promise.all([request('/api/portfolio'), request('/api/jobs')]); setData({ ...portfolio, jobs: jobPayload.jobs }) } catch (err) { setError(err.message) } }
@@ -562,6 +590,17 @@ export default function App() {
     }
   }
 
+  async function previewGithub(task) {
+    setGithubLaunch({ task, loading: true, payload: null })
+    try {
+      const payload = await request(`/api/tasks/${task.id}/github/preview`, { method: 'POST', body: '{}', headers: { 'X-Cortex-Action-Token': data.action_token } })
+      setGithubLaunch({ task, loading: false, payload })
+    } catch (err) {
+      setGithubLaunch(null)
+      setError(err.message)
+    }
+  }
+
   function changeNav(next) {
     if (next === 'timeline') setTimelineProjectId(null)
     setActiveNav(next)
@@ -596,10 +635,11 @@ export default function App() {
         </>}
         <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges or external actions</span></footer>
       </div>
-    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} onTimeline={openProjectTimeline} onCodex={previewCodex} /></div>
+    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} onTimeline={openProjectTimeline} onCodex={previewCodex} onGithub={previewGithub} /></div>
     {manualProject !== undefined && <ManualTaskModal projects={data.projects} initialProject={manualProject || ''} onClose={() => setManualProject(undefined)} onCreated={async () => { setManualProject(undefined); setToast('Manual task added'); await load(true) }} />}
     <RunModal run={selectedRun} onClose={() => setSelectedRun(null)} />
     <CodexLaunchModal launch={codexLaunch} onClose={() => setCodexLaunch(null)} onCopied={() => setToast('Bounded Codex prompt copied')} />
+    <GitHubMirrorModal launch={githubLaunch} onClose={() => setGithubLaunch(null)} onCopied={kind => setToast(kind === 'resume' ? 'Recovery command copied; review before running' : 'Approved apply command copied; review before running')} />
     {toast && <div className="toast"><Check size={15} />{toast}</div>}
   </div>
 }

@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from cortex import db, jobs, runlog, store, webapp
+from cortex import db, github_projects, jobs, runlog, store, webapp
 
 
 @pytest.fixture
@@ -195,6 +195,332 @@ def test_adapter_owned_github_evidence_cannot_be_forged_over_http(
     assert payload["task"]["github_issue_number"] == 7
     assert payload["task"]["github_project_item_id"] == "PVTI_original"
     assert payload["task"]["sync_state"] == '{"fields":{},"fingerprint":"v1:original"}'
+
+
+def test_github_preview_is_explicit_read_only_and_returns_exact_cli_command(
+    dashboard_server, isolated_db, tmp_path, monkeypatch
+):
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Mirror Preview", repo_path=str(tmp_path)
+        )
+        store.update_project(
+            conn,
+            project_id,
+            github_project_owner="octo",
+            github_project_number=4,
+            github_project_id="PVT_target",
+        )
+        task_id = store.create_task(
+            conn,
+            project_id=project_id,
+            title="Preview mirror plan",
+            github_issue_id="I_issue",
+            github_issue_number=12,
+            github_issue_url="https://github.com/octo/demo/issues/12",
+        )
+        event_count = conn.execute("SELECT count(*) FROM activity_events").fetchone()[0]
+        operation_count = conn.execute(
+            "SELECT count(*) FROM github_mirror_operations"
+        ).fetchone()[0]
+
+    plan = github_projects.MirrorPlan(
+        task_id=task_id,
+        project_id="PVT_target",
+        issue_id="I_issue",
+        project_item_id="PVTI_item",
+        snapshot_digest="snapshot-v1",
+        fingerprint="plan-v1:approved",
+        actions=(
+            github_projects.MirrorAction(
+                "set_project_field", "PVTI_item", field="Status", value="Todo"
+            ),
+        ),
+        conflicts=(),
+    )
+    snapshot = {
+        "project_id": "PVT_target",
+        "project_title": "Engineering Mirror",
+        "items": [{
+            "id": "PVTI_item",
+            "content_id": "I_issue",
+            "content": {
+                "title": "GitHub issue title",
+                "state": "OPEN",
+                "url": "https://github.com/octo/demo/issues/12",
+            },
+        }],
+    }
+    monkeypatch.setattr(
+        webapp.github_adapter, "prepare", lambda _task, _owner, _number: (plan, snapshot)
+    )
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    status, payload = request_json(
+        dashboard_server,
+        f"/api/tasks/{task_id}/github/preview",
+        method="POST",
+        body={},
+        headers={"X-Cortex-Action-Token": portfolio["action_token"]},
+    )
+
+    assert status == 200
+    assert payload["mode"] == "read_only_preview"
+    assert payload["status"] == "actions_required"
+    assert payload["can_apply"] is False
+    assert payload["dashboard_apply_enabled"] is False
+    assert payload["target"] == {
+        "owner": "octo",
+        "number": 4,
+        "project_id": "PVT_target",
+        "title": "Engineering Mirror",
+    }
+    assert payload["issue"]["title"] == "GitHub issue title"
+    assert payload["plan"]["fingerprint"] == "plan-v1:approved"
+    assert payload["command"].startswith(
+        f".\\scripts\\cortex-portfolio.ps1 github apply {task_id} "
+    )
+    assert "--approve plan-v1:approved" in payload["command"]
+    assert payload["command_kind"] == "apply"
+    with db.connect(isolated_db) as conn:
+        assert conn.execute("SELECT count(*) FROM activity_events").fetchone()[0] == event_count
+        assert conn.execute(
+            "SELECT count(*) FROM github_mirror_operations"
+        ).fetchone()[0] == operation_count
+
+
+def test_github_preview_rejects_missing_action_token_before_remote_read(
+    dashboard_server, isolated_db, tmp_path, monkeypatch
+):
+    called = False
+
+    def prepare(_task, _owner, _number):
+        nonlocal called
+        called = True
+        raise AssertionError("guard must run before GitHub")
+
+    monkeypatch.setattr(webapp.github_adapter, "prepare", prepare)
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(conn, name="Guarded mirror", repo_path=str(tmp_path))
+        store.update_project(
+            conn, project_id,
+            github_project_owner="octo", github_project_number=4,
+            github_project_id="PVT_target",
+        )
+        task_id = store.create_task(
+            conn, project_id=project_id, title="Guard remote read", github_issue_id="I_issue"
+        )
+    with pytest.raises(HTTPError) as caught:
+        request_json(
+            dashboard_server,
+            f"/api/tasks/{task_id}/github/preview",
+            method="POST",
+            body={},
+        )
+    assert caught.value.code == 403
+    assert called is False
+
+
+def test_github_preview_rejects_cross_site_origin_before_remote_read(
+    dashboard_server, isolated_db, tmp_path, monkeypatch
+):
+    called = False
+
+    def prepare(_task, _owner, _number):
+        nonlocal called
+        called = True
+        raise AssertionError("origin guard must run before GitHub")
+
+    monkeypatch.setattr(webapp.github_adapter, "prepare", prepare)
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(conn, name="Origin guard", repo_path=str(tmp_path))
+        store.update_project(
+            conn, project_id,
+            github_project_owner="octo", github_project_number=4,
+            github_project_id="PVT_target",
+        )
+        task_id = store.create_task(
+            conn, project_id=project_id, title="Reject cross-site", github_issue_id="I_issue"
+        )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    with pytest.raises(HTTPError) as caught:
+        request_json(
+            dashboard_server,
+            f"/api/tasks/{task_id}/github/preview",
+            method="POST",
+            body={},
+            headers={
+                "Origin": "https://attacker.example",
+                "X-Cortex-Action-Token": portfolio["action_token"],
+            },
+        )
+    assert caught.value.code == 403
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    ("configured", "linked", "expected"),
+    [(False, False, "unconfigured"), (True, False, "unlinked")],
+)
+def test_github_preview_explains_setup_state_without_remote_read(
+    dashboard_server, isolated_db, tmp_path, monkeypatch,
+    configured, linked, expected,
+):
+    monkeypatch.setattr(
+        webapp.github_adapter,
+        "prepare",
+        lambda *_args: pytest.fail("setup-state preview must not read GitHub"),
+    )
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(conn, name=f"Setup {expected}", repo_path=str(tmp_path))
+        if configured:
+            store.update_project(
+                conn, project_id,
+                github_project_owner="octo", github_project_number=4,
+                github_project_id="PVT_target",
+            )
+        task_id = store.create_task(
+            conn,
+            project_id=project_id,
+            title="Explain setup",
+            github_issue_id="I_issue" if linked else None,
+        )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    status, payload = request_json(
+        dashboard_server,
+        f"/api/tasks/{task_id}/github/preview",
+        method="POST",
+        body={},
+        headers={"X-Cortex-Action-Token": portfolio["action_token"]},
+    )
+    assert status == 200
+    assert payload["status"] == expected
+    assert payload["plan"] is None
+    assert payload["command"] is None
+
+
+def test_github_preview_surfaces_durable_recovery_command(
+    dashboard_server, isolated_db, tmp_path, monkeypatch
+):
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(conn, name="Recover mirror", repo_path=str(tmp_path))
+        store.update_project(
+            conn, project_id,
+            github_project_owner="octo", github_project_number=4,
+            github_project_id="PVT_target",
+        )
+        task_id = store.create_task(
+            conn, project_id=project_id, title="Resume mirror", github_issue_id="I_issue"
+        )
+        store.claim_github_mirror_operation(
+            conn,
+            operation_id="ghm-recover-123",
+            task_id=task_id,
+            project_id=project_id,
+            plan_fingerprint="plan-v1:original",
+            github_project_id="PVT_target",
+            github_issue_id="I_issue",
+            github_project_item_id="PVTI_item",
+            actor="codex",
+            session_id=None,
+            actions=[{"kind": "set_project_field", "field": "Status"}],
+        )
+        store.update_github_mirror_operation(
+            conn,
+            "ghm-recover-123",
+            status="interrupted",
+            completed_actions=[{"index": 0, "kind": "set_project_field"}],
+            evidence={"remote_writes": 1, "recoverable": True},
+            error="connection ended after verification",
+        )
+
+    current_plan = github_projects.MirrorPlan(
+        task_id=task_id,
+        project_id="PVT_target",
+        issue_id="I_issue",
+        project_item_id="PVTI_item",
+        snapshot_digest="snapshot-after-interruption",
+        fingerprint="plan-v1:fresh-different",
+        actions=(),
+        conflicts=(),
+    )
+    monkeypatch.setattr(
+        webapp.github_adapter,
+        "prepare",
+        lambda *_args: (
+            current_plan,
+            {"project_id": "PVT_target", "project_title": "Engineering Mirror", "items": []},
+        ),
+    )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    _, payload = request_json(
+        dashboard_server,
+        f"/api/tasks/{task_id}/github/preview",
+        method="POST",
+        body={},
+        headers={"X-Cortex-Action-Token": portfolio["action_token"]},
+    )
+    assert payload["status"] == "recoverable"
+    assert payload["command_kind"] == "resume"
+    assert "--approve plan-v1:original" in payload["command"]
+    assert "--operation-id ghm-recover-123" in payload["command"]
+    assert payload["operation"]["completed_actions"] == [
+        {"index": 0, "kind": "set_project_field"}
+    ]
+    assert payload["operation"]["evidence"] == {
+        "recoverable": True, "remote_writes": 1
+    }
+
+
+def test_github_preview_preserves_recovery_evidence_when_fresh_read_fails(
+    dashboard_server, isolated_db, tmp_path, monkeypatch
+):
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(conn, name="Offline recovery", repo_path=str(tmp_path))
+        store.update_project(
+            conn, project_id,
+            github_project_owner="octo", github_project_number=4,
+            github_project_id="PVT_target",
+        )
+        task_id = store.create_task(
+            conn, project_id=project_id, title="Recover offline", github_issue_id="I_issue"
+        )
+        store.claim_github_mirror_operation(
+            conn,
+            operation_id="ghm-offline-123",
+            task_id=task_id,
+            project_id=project_id,
+            plan_fingerprint="plan-v1:offline",
+            github_project_id="PVT_target",
+            github_issue_id="I_issue",
+            github_project_item_id="PVTI_item",
+            actor="codex",
+            session_id=None,
+            actions=[{"kind": "set_project_field", "field": "Status"}],
+        )
+        store.update_github_mirror_operation(
+            conn, "ghm-offline-123", status="interrupted", error="network ended"
+        )
+    monkeypatch.setattr(
+        webapp.github_adapter,
+        "prepare",
+        lambda *_args: (_ for _ in ()).throw(
+            webapp.github_reader.GitHubProjectError("GitHub CLI is offline")
+        ),
+    )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    status, payload = request_json(
+        dashboard_server,
+        f"/api/tasks/{task_id}/github/preview",
+        method="POST",
+        body={},
+        headers={"X-Cortex-Action-Token": portfolio["action_token"]},
+    )
+    assert status == 200
+    assert payload["status"] == "recoverable"
+    assert payload["plan"] is None
+    assert payload["read_error"] == "GitHub CLI is offline"
+    assert "--operation-id ghm-offline-123" in payload["command"]
 
 
 def test_activity_endpoint_filters_by_project_task_and_session(

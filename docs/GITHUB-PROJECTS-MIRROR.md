@@ -185,6 +185,21 @@ The dashboard cannot edit `github_issue_id`, `github_issue_number`,
 verification evidence. No daemon, webhook, scheduled job, bulk mode, issue
 creation, title matching, or GitHub-owned issue-field mutation exists.
 
+For operator visibility, each active task in the dashboard drawer includes
+**Check GitHub mirror**. This action is never called by portfolio polling. An
+explicit click must pass the dashboard's loopback Host/Origin check and action
+token before the server performs a complete Project read and strict dry-run.
+The modal shows the configured target, stable issue and item identities, fresh
+snapshot and plan fingerprints, actions or conflicts, and the latest durable
+operation evidence. An `applying` or `interrupted` operation is presented with
+its original recovery fingerprint and operation ID rather than a newly derived
+command.
+
+The browser surface is copy-only: it returns `can_apply: false`, exposes no
+apply route, and labels the exact PowerShell command as a command to review and
+copy. Copying it does not execute it. Unconfigured projects and unlinked tasks
+return local setup guidance without invoking GitHub.
+
 ## Live one-item acceptance gate
 
 The GitHub CLI credential has the required `project` scope. The initial

@@ -188,6 +188,15 @@ requires both exact values printed by that fresh plan:
   --operation-id <operation-id>
 ```
 
+The project drawer also has **Check GitHub mirror** for each active task. It is
+an explicit, on-demand read-only preview of the same strict plan: target and
+stable issue/item identity, actions or conflicts, fingerprint, and any durable
+recovery operation are shown together. When a safe CLI action or recovery is
+available, the dashboard can copy the exact command, but it has no GitHub apply
+endpoint and never runs that command. Portfolio polling does not contact
+GitHub; the preview requires the local dashboard Host/Origin guard and action
+token before invoking `gh`.
+
 Every field is checked immediately before its mutation, every result is
 re-read, and the local Project-item link and sync evidence commit atomically
 only after remote verification. Interrupted operations retain their exact

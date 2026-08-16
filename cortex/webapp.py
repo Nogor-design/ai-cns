@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
-    routing, runlog, secrets_scan, store, team, workers,
+    github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
 )
 
 WORKER_NAMES = ("codex", "claude", "gemini", "grok", "ollama", "perplexity")
@@ -59,6 +59,154 @@ def _activity_dict(row: sqlite3.Row) -> dict[str, Any]:
     else:
         item["evidence"] = None
     return item
+
+
+def _mirror_operation_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    item = _row_dict(row)
+    for source, target in (
+        ("actions_json", "actions"),
+        ("completed_actions_json", "completed_actions"),
+        ("evidence_json", "evidence"),
+    ):
+        value = item.get(source)
+        if value:
+            try:
+                item[target] = json.loads(value)
+            except (TypeError, json.JSONDecodeError):
+                item[target] = None
+        else:
+            item[target] = [] if target != "evidence" else None
+    return item
+
+
+def _mirror_apply_command(task_id: str, fingerprint: str, operation_id: str) -> str:
+    return (
+        f".\\scripts\\cortex-portfolio.ps1 github apply {task_id} "
+        f"--approve {fingerprint} --operation-id {operation_id}"
+    )
+
+
+def github_mirror_preview(
+    conn: sqlite3.Connection, task_id: str
+) -> dict[str, Any]:
+    """Build an explicit-click, read-only GitHub mirror readiness preview."""
+    task = store.get_task(conn, task_id)
+    project = store.get_project(conn, task["project_id"])
+    latest_row = store.latest_github_mirror_operation(conn, task["id"])
+    latest = _mirror_operation_dict(latest_row)
+    owner = project["github_project_owner"]
+    number = project["github_project_number"]
+    base: dict[str, Any] = {
+        "mode": "read_only_preview",
+        "task_id": task["id"],
+        "project_id": project["id"],
+        "can_apply": False,
+        "dashboard_apply_enabled": False,
+        "target": None,
+        "issue": {
+            "id": task["github_issue_id"],
+            "number": task["github_issue_number"],
+            "url": task["github_issue_url"],
+        },
+        "plan": None,
+        "operation": latest,
+        "command": None,
+        "command_kind": None,
+        "note": (
+            "This on-demand preview only reads GitHub. The dashboard cannot apply "
+            "the plan; copying a command does not run it."
+        ),
+    }
+    if not owner or number is None or not project["github_project_id"]:
+        base.update(
+            status="unconfigured",
+            summary="This Cortex project has no verified GitHub Project target.",
+        )
+        return base
+    base["target"] = {
+        "owner": str(owner),
+        "number": int(number),
+        "project_id": project["github_project_id"],
+        "title": None,
+    }
+    if not task["github_issue_id"]:
+        base.update(
+            status="unlinked",
+            summary="Link one explicit existing GitHub issue before planning a mirror update.",
+        )
+        return base
+
+    recoverable = latest and latest["status"] in {"applying", "interrupted"}
+    try:
+        plan, snapshot = github_adapter.prepare(task, str(owner), int(number))
+    except (github_reader.GitHubProjectError, github_adapter.MirrorApplyError) as exc:
+        if not recoverable:
+            raise
+        base.update(
+            status="recoverable",
+            summary=(
+                f"Mirror operation {latest['operation_id']} can be resumed, but the "
+                "fresh GitHub read is currently unavailable."
+            ),
+            command=_mirror_apply_command(
+                task["id"], latest["plan_fingerprint"], latest["operation_id"]
+            ),
+            command_kind="resume",
+            read_error=str(exc),
+        )
+        return base
+    if snapshot["project_id"] != project["github_project_id"]:
+        raise ValueError("configured GitHub Project node ID changed")
+    base["target"]["title"] = snapshot.get("project_title")
+    base["plan"] = plan.as_dict()
+    remote_item = next(
+        (
+            item for item in snapshot.get("items", [])
+            if item.get("content_id") == task["github_issue_id"]
+        ),
+        None,
+    )
+    if remote_item:
+        content = remote_item.get("content") or {}
+        base["issue"].update(
+            title=content.get("title"),
+            state=content.get("state"),
+            url=content.get("url") or task["github_issue_url"],
+        )
+
+    if recoverable:
+        base.update(
+            status="recoverable",
+            summary=(
+                f"Mirror operation {latest['operation_id']} can be safely resumed "
+                "with its original approval."
+            ),
+            command=_mirror_apply_command(
+                task["id"], latest["plan_fingerprint"], latest["operation_id"]
+            ),
+            command_kind="resume",
+        )
+    elif not plan.safe_to_apply:
+        base.update(
+            status="conflict",
+            summary="GitHub or Cortex evidence changed; review the conflicts before applying.",
+        )
+    elif plan.actions:
+        operation_id = github_adapter.suggested_operation_id(plan.fingerprint)
+        base.update(
+            status="actions_required",
+            summary=f"{len(plan.actions)} verified mirror action(s) are ready for CLI approval.",
+            command=_mirror_apply_command(task["id"], plan.fingerprint, operation_id),
+            command_kind="apply",
+        )
+    else:
+        base.update(
+            status="converged",
+            summary="Cortex and the linked GitHub Project item are already in sync.",
+        )
+    return base
 
 
 def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -556,6 +704,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if (
                 len(parts) == 5
                 and parts[:2] == ["api", "tasks"]
+                and parts[3:] == ["github", "preview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = github_mirror_preview(conn, parts[2])
+                self._json(HTTPStatus.OK, payload)
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "tasks"]
                 and parts[3:] == ["codex", "preview"]
             ):
                 if not self._allow_local_action():
@@ -626,7 +785,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     store.update_task(conn, task_id, status=body["status"])
                 task = _row_dict(store.get_task(conn, task_id))
             self._json(HTTPStatus.CREATED, {"task": task})
-        except (KeyError, TypeError, ValueError, store.NotFound) as exc:
+        except (
+            KeyError, TypeError, ValueError, store.NotFound,
+            github_reader.GitHubProjectError, github_adapter.MirrorApplyError,
+        ) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
     def do_PATCH(self) -> None:  # noqa: N802
