@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import {
-  ArrowLeft, ArrowRight, Check, Cpu, FileCheck2, FolderGit2, FolderPlus,
+  ArrowLeft, ArrowRight, Check, Cpu, FileCheck2, FolderGit2, FolderOpen, FolderPlus,
   LoaderCircle, ShieldCheck, X,
 } from 'lucide-react'
 
@@ -22,13 +22,25 @@ function Fact({ icon: Icon, label, value, tone = '' }) {
   return <span className={`project-preview-fact ${tone}`}><Icon size={16} /><small>{label}</small><strong>{value}</strong></span>
 }
 
-export default function AddProjectModal({ onClose, onPreview, onRegister }) {
+export default function AddProjectModal({ onClose, onBrowse, onPreview, onRegister }) {
   const [step, setStep] = useState('path')
   const [repoPath, setRepoPath] = useState('')
   const [preview, setPreview] = useState(null)
   const [form, setForm] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [browsing, setBrowsing] = useState(false)
   const [error, setError] = useState('')
+
+  async function browse() {
+    setBrowsing(true); setError('')
+    try {
+      const result = await onBrowse(repoPath)
+      if (result.selected) {
+        setRepoPath(result.repo_path)
+        setPreview(null)
+      }
+    } catch (err) { setError(err.message) } finally { setBrowsing(false) }
+  }
 
   async function inspect(event) {
     event.preventDefault()
@@ -47,6 +59,7 @@ export default function AddProjectModal({ onClose, onPreview, onRegister }) {
         test_command: result.test_command || '',
         allowed_workers: result.default_workers,
         track_state: true,
+        guided_blueprint: true,
       })
       if (!result.already_registered) setStep('details')
     } catch (err) { setError(err.message) } finally { setBusy(false) }
@@ -83,12 +96,12 @@ export default function AddProjectModal({ onClose, onPreview, onRegister }) {
     <StepRail step={step} />
 
     {step === 'path' && <form className="project-path-step" onSubmit={inspect}>
-      <div className="project-step-heading"><FolderPlus size={20} /><div><h3>Which project should Cortex track?</h3><p>Enter its full local folder path. Cortex previews metadata without changing the project.</p></div></div>
-      <label>Project folder<input autoFocus value={repoPath} onChange={event => setRepoPath(event.target.value)} placeholder="D:\\trader-dan" required /></label>
+      <div className="project-step-heading"><FolderPlus size={20} /><div><h3>Which project should Cortex track?</h3><p>Choose a folder or enter its full local path. Cortex previews metadata without changing the project.</p></div></div>
+      <label>Project folder<div className="project-path-input"><input autoFocus value={repoPath} onChange={event => setRepoPath(event.target.value)} placeholder="D:\\trader-dan" required /><button type="button" onClick={browse} disabled={busy || browsing} aria-label="Browse for project folder">{browsing ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}{browsing ? 'Opening…' : 'Browse'}</button></div></label>
       <div className="project-local-note"><ShieldCheck size={15} /><span>This stays on your computer. Preview does not contact GitHub, start AI, or write a state file.</span></div>
       {preview?.already_registered && <div className="project-form-error">This folder is already registered as <strong>{preview.existing_project_id}</strong>.</div>}
       {error && <div className="project-form-error">{error}</div>}
-      <div className="modal-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy || !repoPath.trim()}>{busy ? <LoaderCircle className="spin" size={14} /> : <ArrowRight size={14} />}{busy ? 'Checking…' : 'Preview project'}</button></div>
+      <div className="modal-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary" disabled={busy || browsing || !repoPath.trim()}>{busy ? <LoaderCircle className="spin" size={14} /> : <ArrowRight size={14} />}{busy ? 'Checking…' : 'Preview project'}</button></div>
     </form>}
 
     {step === 'details' && form && <form className="project-details-step" onSubmit={continueToReview}>
@@ -110,16 +123,17 @@ export default function AddProjectModal({ onClose, onPreview, onRegister }) {
       </div>
       <fieldset className="project-worker-picker"><legend>AI workers allowed to read this project</legend><p>{form.privacy === 'restricted' ? 'Restricted starts local-only. Select a cloud worker only if you intend to permit repository access.' : 'You can tighten this allowlist later from the project drawer.'}</p><div>{WORKERS.map(worker => <label key={worker} className={form.allowed_workers.includes(worker) ? 'selected' : ''}><input type="checkbox" checked={form.allowed_workers.includes(worker)} onChange={() => toggleWorker(worker)} /><span>{worker}</span>{CLOUD_WORKERS.has(worker) ? <small>cloud</small> : <small>local</small>}</label>)}</div></fieldset>
       <label className="project-state-choice"><input type="checkbox" checked={form.track_state} onChange={event => setForm({ ...form, track_state: event.target.checked })} /><span><strong>Track project state in the repository</strong><small>{preview.state_exists ? `Preserve the existing ${preview.state_path}` : `Create ${preview.state_path}`}</small></span></label>
+      <label className="project-state-choice"><input type="checkbox" checked={form.guided_blueprint} onChange={event => setForm({ ...form, guided_blueprint: event.target.checked })} /><span><strong>Build the project blueprint next</strong><small>Recommended: answer five product-intent questions, define the current phase, and approve an exact preview before guided execution.</small></span></label>
       {error && <div className="project-form-error">{error}</div>}
       <div className="modal-actions"><button type="button" onClick={() => { setStep('path'); setError('') }}><ArrowLeft size={14} />Back</button><button className="primary"><ArrowRight size={14} />Review project</button></div>
     </form>}
 
     {step === 'review' && form && <div className="project-review-step">
       <div className="project-review-title"><span className="project-monogram large">{form.name.slice(0,2).toUpperCase()}</span><div><h3>{form.name}</h3><p>{form.repo_path}</p></div><em>P{form.priority}</em></div>
-      <dl><div><dt>Current goal</dt><dd>{form.current_goal}</dd></div><div><dt>Program</dt><dd>{form.program || 'general'}</dd></div><div><dt>Privacy</dt><dd>{form.privacy}</dd></div><div><dt>Stack</dt><dd>{form.stack || 'Not recorded'}</dd></div><div><dt>Tests</dt><dd>{form.test_command || 'Not recorded'}</dd></div><div><dt>Allowed workers</dt><dd>{form.allowed_workers.join(', ')}</dd></div><div><dt>State file</dt><dd>{form.track_state ? preview.state_exists ? 'Preserve existing state file' : 'Create starter state file' : 'Deferred'}</dd></div></dl>
+      <dl><div><dt>Current goal</dt><dd>{form.current_goal}</dd></div><div><dt>Program</dt><dd>{form.program || 'general'}</dd></div><div><dt>Privacy</dt><dd>{form.privacy}</dd></div><div><dt>Stack</dt><dd>{form.stack || 'Not recorded'}</dd></div><div><dt>Tests</dt><dd>{form.test_command || 'Not recorded'}</dd></div><div><dt>Allowed workers</dt><dd>{form.allowed_workers.join(', ')}</dd></div><div><dt>State file</dt><dd>{form.track_state ? preview.state_exists ? 'Preserve existing state file' : 'Create starter state file' : 'Deferred'}</dd></div><div><dt>Next step</dt><dd>{form.guided_blueprint ? 'Guided blueprint interview' : 'Quick registration only · Blueprint needed'}</dd></div></dl>
       <div className="project-local-note"><ShieldCheck size={15} /><span>Registration updates local Cortex and optionally creates one starter state file. It does not create GitHub items or start an AI worker.</span></div>
       {error && <div className="project-form-error">{error}</div>}
-      <div className="modal-actions"><button type="button" onClick={() => { setStep('details'); setError('') }}><ArrowLeft size={14} />Edit settings</button><button type="button" className="primary" onClick={register} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{busy ? 'Registering…' : 'Register project'}</button></div>
+      <div className="modal-actions"><button type="button" onClick={() => { setStep('details'); setError('') }}><ArrowLeft size={14} />Edit settings</button><button type="button" className="primary" onClick={register} disabled={busy}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{busy ? 'Registering…' : form.guided_blueprint ? 'Register & build blueprint' : 'Register project'}</button></div>
     </div>}
   </section></div>
 }

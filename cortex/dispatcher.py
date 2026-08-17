@@ -12,7 +12,7 @@ from pathlib import Path
 from . import brief as brief_mod
 from . import (
     config, evidence, gitutil, ids, policy, routing, runlog, runs, secrets_scan,
-    store, workers, worktrees,
+    project_blueprints, store, workers, worktrees,
 )
 
 
@@ -51,6 +51,10 @@ def preview(
     action_override: str | None = None,
 ) -> DispatchPreview:
     project = store.get_project(conn, task["project_id"])
+    try:
+        project_blueprints.assert_execution_ready(project)
+    except ValueError as exc:
+        raise DispatchError(str(exc)) from exc
     # A caller-supplied worker is a live instruction and is honoured verbatim:
     # if it is not permitted, dispatch says so rather than running something
     # else. Otherwise the effective route applies -- stored assignee first,

@@ -1,15 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertTriangle, Bot, CalendarRange, Check, CheckCircle2, ChevronRight, CircleAlert,
-  CirclePlay, Clock3, Copy, Cpu, FolderGit2, FolderPlus, GitBranch, Gauge, LayoutDashboard,
-  Github, LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
+  Activity, AlertTriangle, BookOpen, Bot, CalendarRange, Check, CheckCircle2, ChevronRight, CircleAlert,
+  CirclePlay, Clock3, Copy, Cpu, FileText, FolderGit2, FolderPlus, GitBranch, Gauge, LayoutDashboard,
+  Github, GitMerge, LoaderCircle, MoreHorizontal, PauseCircle, Plus, RefreshCw, RotateCcw,
   Search, ShieldCheck, Sparkles, Trash2, UsersRound, UserRound, WandSparkles, X,
 } from 'lucide-react'
 import { filterAndGroupTimeline } from './timeline.js'
 import { mirrorActionLabel, mirrorStatusMeta } from './githubMirror.js'
+import { renderBlueprintMarkdown, renderBlueprintPlanBasis } from './blueprintRenderer.js'
 import RoadmapView from './RoadmapView.jsx'
 import AddProjectModal from './AddProjectModal.jsx'
 import RemoveProjectModal from './RemoveProjectModal.jsx'
+import BlueprintOnboardingModal from './BlueprintOnboardingModal.jsx'
+import PhaseDecompositionModal from './PhaseDecompositionModal.jsx'
+import PhaseDependencyModal from './PhaseDependencyModal.jsx'
+import PhaseEvidenceModal from './PhaseEvidenceModal.jsx'
 
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
@@ -227,6 +232,7 @@ function SuggestionCard({ suggestion, project, onApprove, onDismiss }) {
   return (
     <article className="suggestion-card" data-suggestion={suggestion.id}>
       <div className="suggestion-top"><span className="project-kicker">{project?.name}</span><Priority value={suggestion.priority} /></div>
+      {suggestion.phase_name && <small className="suggestion-phase">{suggestion.phase_name} · {suggestion.exit_criterion_ref}</small>}
       <h3>{suggestion.title}</h3><p className="why">{suggestion.why}</p>
       <div className="acceptance"><Check size={14} /><span><strong>Done when</strong>{suggestion.acceptance}</span></div>
       <div className="route-strip"><span className="execution-label">Executes with</span><WorkerBadge name={suggestion.recommended_worker} /><span>{pretty(suggestion.action)}</span><span>{suggestion.budget} effort</span></div>
@@ -410,11 +416,71 @@ function DrawerTask({ task, onTaskUpdate, onStart, onCodex, onGithub }) {
   </div>
 }
 
-function ProjectDrawer({ project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist, onTimeline, onCodex, onGithub, onRemove }) {
+function BlueprintPanel({ blueprint, onBuild, onDecompose, onDependencies, onEvidence, onViewDocument }) {
+  const status = blueprint?.status || 'missing'
+  const current = blueprint?.phases?.find(phase => phase.id === blueprint.current_phase_id)
+  const phaseQuality = blueprint?.phase_quality || null
+  const onboarding = ['missing', 'draft', 'review'].includes(status)
+  return <section className={`blueprint-panel blueprint-${status}`}>
+    <div className="drawer-section-head"><label><BookOpen size={13} />Project blueprint</label><span className="blueprint-status">{status === 'missing' ? 'Blueprint needed' : pretty(status)}</span></div>
+    {onboarding ? <><p>{status === 'missing' ? 'Cortex has no approved design and phase contract for this legacy project yet. Existing work remains available.' : 'The guided blueprint interview is saved locally and can be resumed without repeating repository discovery.'}</p><button type="button" className="build-blueprint-action" onClick={onBuild}><BookOpen size={14} />{status === 'missing' ? 'Build project blueprint' : 'Resume blueprint interview'}</button></> : <>
+      {current && <div className="current-phase-summary"><small>Current phase</small><strong>{current.name}</strong><span>{current.outcome}</span>{current.progress && <div className="current-phase-progress"><i><span style={{ width: `${current.progress.percent}%` }} /></i><small>{current.progress.accepted}/{current.progress.total} accepted criteria · {current.progress.percent}%</small></div>}</div>}
+      {phaseQuality && <div className="blueprint-phase-quality">
+        <div className="current-phase-summary"><small>Phase evidence quality</small><strong>{phaseQuality.coverage.accepted}/{phaseQuality.coverage.total} accepted ({phaseQuality.coverage.percent}%)</strong><span>{phaseQuality.stale_phase_count ? `${phaseQuality.stale_phase_count} stale phase${phaseQuality.stale_phase_count === 1 ? '' : 's'}` : 'No stale phases'}</span></div>
+        {!!phaseQuality.dependency_blockers.length && <div className="blueprint-dependency-blockers"><small>Dependency blockers</small><ul>{phaseQuality.dependency_blockers.slice(0, 3).map(blocker => <li key={blocker}>{blocker}</li>)}</ul></div>}
+        {!!phaseQuality.recurring_evidence_gaps.length && <div className="blueprint-recurring-gaps"><small>Recurring evidence gaps</small><ul>{phaseQuality.recurring_evidence_gaps.slice(0, 4).map((gap, index) => <li key={`${gap.criterion}-${index}`}>{gap.criterion} · <em>{gap.occurrences} phases</em></li>)}</ul></div>}
+      </div>}
+      <div className="phase-rail" aria-label="Delivery phases">
+        {(blueprint.phases || []).map(phase => <div key={phase.id} className={`phase-step phase-${phase.status}`}><span>{phase.ordinal}</span><div><strong>{phase.name}</strong><small>{pretty(phase.status)}</small></div></div>)}
+      </div>
+      {blueprint.revision && <small className="blueprint-revision">Revision {blueprint.revision.ordinal} · approved {relativeDate(blueprint.revision.approved_at)} · <code>{blueprint.content_hash?.slice(0, 10)}</code></small>}
+      {status === 'approved' && ['active', 'review'].includes(current?.status) && <button type="button" className="decompose-phase-action" onClick={onDecompose}><Sparkles size={14} />Break down current phase</button>}
+      {status === 'approved' && (blueprint.phases || []).length > 1 && <button type="button" className="phase-dependency-action" onClick={onDependencies}><GitMerge size={14} />Manage phase dependencies</button>}
+      {(blueprint.revision || status === 'missing') && <button type="button" className="blueprint-document-action" onClick={onViewDocument}><FileText size={14} />View blueprint source</button>}
+      {status === 'approved' && ['active', 'review'].includes(current?.status) && <button type="button" className="review-phase-evidence-action" onClick={onEvidence}><CheckCircle2 size={14} />{current?.status === 'review' ? 'Review completion gate' : 'Review exit evidence'}</button>}
+      {status === 'stale' && <p className="blueprint-drift"><AlertTriangle size={13} />The repository blueprint changed after approval. Current work remains visible; new phase planning needs reconciliation.</p>}
+    </>}
+  </section>
+}
+
+function BlueprintDocumentModal({ payload, onClose }) {
+  if (!payload?.project) return null
+  const blueprint = payload.project.blueprint || {}
+  const planBasis = blueprint?.revision?.plan_basis || {}
+  return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}><section className="blueprint-document-modal">
+    <div className="modal-head">
+      <div><span className="eyebrow">Design document</span><h2>Blueprint design source</h2><p>{payload.project.name}</p></div>
+      <button className="icon-button" onClick={onClose}><X size={18} /></button>
+    </div>
+    <div className="blueprint-modal-meta">
+      <label><small>Source path</small><code>{payload.path}</code></label>
+      <label><small>Status</small><span>{payload.status}</span></label>
+      <label><small>Revision</small><span>{blueprint.revision ? `#${blueprint.revision.ordinal}` : 'Not recorded'}</span></label>
+    </div>
+    {renderBlueprintPlanBasis(planBasis)}
+    <label className="blueprint-document-markdown-label"><small>Blueprint markdown</small>
+      <div className="blueprint-document-markdown-shell">{renderBlueprintMarkdown(payload.content || 'No blueprint document is available for this project.')}</div>
+    </label>
+  </section></div>
+}
+
+function ProjectDrawer({
+  project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist,
+  onTimeline, onCodex, onGithub, onRemove, onBlueprint, onDecompose, onEvidence,
+  onDependencies, onViewBlueprintDocument,
+}) {
   if (!project) return null
   return <aside className="drawer"><div className="drawer-head"><div><span className="project-monogram large" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span><span><small>{project.program}</small><h2>{project.name}</h2></span></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <div className="drawer-primary"><button onClick={() => onPlan(project.project_id, 'codex')}><Sparkles size={16} />Ask Codex to plan next</button><button onClick={() => onPlan(project.project_id, 'ollama')}><Cpu size={16} />Use local planner</button></div>
     <section><label>Current goal</label><p>{project.current_goal || 'No goal has been set.'}</p></section>
+    <BlueprintPanel
+      blueprint={project.blueprint}
+      onBuild={() => onBlueprint(project.project_id)}
+      onDecompose={() => onDecompose(project.project_id)}
+      onDependencies={() => onDependencies(project.project_id)}
+      onEvidence={() => onEvidence(project.project_id)}
+      onViewDocument={() => onViewBlueprintDocument(project.project_id)}
+    />
     <section className="drawer-evidence"><label>Repository evidence</label><div><GitBranch size={14} />{project.branch || 'Not under Git'}<span>{gitLabel(project)}</span></div>{project.warnings?.[0] && <small><AlertTriangle size={13} />{project.warnings[0]}</small>}<button type="button" className="drawer-timeline-action" onClick={() => onTimeline(project.project_id)}><Clock3 size={14} />View project timeline</button></section>
     <WorkerAllowlist project={project} onChange={onAllowlist} />
     <section><div className="drawer-section-head"><label>Active work ({project.tasks.length})</label><button onClick={() => onManual(project.project_id)}><Plus size={13} />Manual</button></div><div className="drawer-task-list">{project.tasks.map(task => <DrawerTask key={task.id} task={task} onTaskUpdate={onTaskUpdate} onStart={onStart} onCodex={onCodex} onGithub={onGithub} />)}{!project.tasks.length && <div className="lane-empty">No active tasks.</div>}</div></section>
@@ -480,15 +546,20 @@ function ManualTaskModal({ projects, initialProject, onClose, onCreated }) {
 export default function App() {
   const [data, setData] = useState(null), [activeNav, setActiveNav] = useState('overview')
   const [selectedId, setSelectedId] = useState(null), [search, setSearch] = useState('')
+  const [projectContextId, setProjectContextId] = useState(null)
   const [planner, setPlanner] = useState('codex'), [job, setJob] = useState(null)
   const [error, setError] = useState(''), [toast, setToast] = useState('')
   const [manualProject, setManualProject] = useState(undefined)
   const [selectedRun, setSelectedRun] = useState(null)
-  const [timelineProjectId, setTimelineProjectId] = useState(null)
   const [codexLaunch, setCodexLaunch] = useState(null)
   const [githubLaunch, setGithubLaunch] = useState(null)
   const [showAddProject, setShowAddProject] = useState(false)
   const [removalProject, setRemovalProject] = useState(null)
+  const [blueprintProjectId, setBlueprintProjectId] = useState(null)
+  const [phasePreviewProjectId, setPhasePreviewProjectId] = useState(null)
+  const [phaseDependencyProjectId, setPhaseDependencyProjectId] = useState(null)
+  const [phaseEvidenceProjectId, setPhaseEvidenceProjectId] = useState(null)
+  const [blueprintDocumentPayload, setBlueprintDocumentPayload] = useState(null)
   const pollRef = useRef(null)
 
   const previewProjectRemoval = useCallback(async projectId => {
@@ -519,7 +590,11 @@ export default function App() {
   const visibleRuns = (data?.runs || []).filter(run => visibleIds.has(run.project_id))
   const serverRunningJobs = (data?.jobs || []).filter(item => item.status === 'running')
   const selected = projectMap[selectedId] || null
-  const timelineProject = projectMap[timelineProjectId] || null
+  const projectContext = projectMap[projectContextId] || null
+  const blueprintProject = projectMap[blueprintProjectId] || null
+  const phasePreviewProject = projectMap[phasePreviewProjectId] || null
+  const phaseDependencyProject = projectMap[phaseDependencyProjectId] || null
+  const phaseEvidenceProject = projectMap[phaseEvidenceProjectId] || null
 
   useEffect(() => {
     if (!serverRunningJobs.length || job) return undefined
@@ -543,7 +618,7 @@ export default function App() {
     }, 1500)
   }
 
-  async function planProject(projectId = selectedId, workerOverride = planner, force = false) {
+  async function planProject(projectId = selectedId || projectContextId, workerOverride = planner, force = false) {
     const target = projectId
     if (!target) { setError('Select an active project first.'); return }
     let allowCloud = false
@@ -559,7 +634,7 @@ export default function App() {
       const payload = await request('/api/continue', { method: 'POST', body: JSON.stringify({ worker: planner }) })
       if (payload.job_id) { watchJob(payload.job_id, 'Planning'); return }
       const focus = payload.focus
-      if (focus.project_id) setSelectedId(focus.project_id)
+      if (focus.project_id) selectProject(focus.project_id)
       const target = focus.kind === 'suggestion' ? `[data-suggestion="${focus.id}"]` : `[data-task="${focus.id}"]`
       setTimeout(() => document.querySelector(target)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80)
       setToast(focus.kind === 'decision' ? 'This item needs your decision' : focus.kind === 'suggestion' ? 'This is the next recommended move' : 'This is the next work item')
@@ -608,6 +683,13 @@ export default function App() {
     })
     return payload.preview
   }
+  async function browseProject(initialPath) {
+    return request('/api/projects/browse', {
+      method: 'POST',
+      body: JSON.stringify({ initial_path: initialPath }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+  }
   async function registerProject(fields) {
     const payload = await request('/api/projects', {
       method: 'POST',
@@ -616,9 +698,117 @@ export default function App() {
     })
     await load(true)
     setSelectedId(payload.project.id)
+    setProjectContextId(payload.project.id)
     setActiveNav('projects')
     setToast(`${payload.project.name} added to Cortex`)
+    if (fields.guided_blueprint !== false) setBlueprintProjectId(payload.project.id)
     return payload
+  }
+  async function startBlueprint(projectId) {
+    const payload = await request(`/api/projects/${projectId}/blueprint/draft`, {
+      method: 'POST', body: '{}',
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    return payload.draft
+  }
+  async function saveBlueprintDraft(projectId, answers, stage) {
+    const payload = await request(`/api/projects/${projectId}/blueprint/draft`, {
+      method: 'POST', body: JSON.stringify({ answers, stage }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    return payload.draft
+  }
+  async function previewBlueprintDraft(projectId) {
+    const payload = await request(`/api/projects/${projectId}/blueprint/draft-preview`, {
+      method: 'POST', body: '{}',
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    return payload.preview
+  }
+  async function approveBlueprint(projectId, preview) {
+    const payload = await request(`/api/projects/${projectId}/blueprint/approve`, {
+      method: 'POST',
+      body: JSON.stringify({
+        preview_fingerprint: preview.preview_fingerprint,
+      }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    setToast(`${projectMap[projectId]?.name || 'Project'} blueprint approved`)
+    return payload.blueprint
+  }
+  async function previewPhaseDecomposition(projectId) {
+    const payload = await request(`/api/projects/${projectId}/phase/decomposition-preview`, {
+      method: 'POST', body: '{}',
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    return payload.preview
+  }
+  async function approvePhaseDecomposition(projectId, previewFingerprint) {
+    const payload = await request(`/api/projects/${projectId}/phase/decomposition-approve`, {
+      method: 'POST', body: JSON.stringify({ preview_fingerprint: previewFingerprint }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    setToast(`${payload.decomposition.suggestion_ids.length} phase suggestion${payload.decomposition.suggestion_ids.length === 1 ? '' : 's'} ready for approval`)
+    return payload.decomposition
+  }
+  async function loadPhaseEvidence(projectId) {
+    const payload = await request(`/api/projects/${projectId}/phase/evidence-overview`, {
+      method: 'POST', body: '{}',
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    return payload.evidence
+  }
+  async function acceptPhaseEvidence(projectId, criterionRef, previewFingerprint) {
+    const payload = await request(`/api/projects/${projectId}/phase/evidence-approve`, {
+      method: 'POST',
+      body: JSON.stringify({ exit_criterion_ref: criterionRef, preview_fingerprint: previewFingerprint }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    setToast(`${criterionRef} evidence accepted`)
+    return payload.acceptance
+  }
+  async function movePhaseToReview(projectId, previewFingerprint) {
+    const payload = await request(`/api/projects/${projectId}/phase/review-approve`, {
+      method: 'POST', body: JSON.stringify({ preview_fingerprint: previewFingerprint }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    setToast(`${projectMap[projectId]?.name || 'Project'} phase moved to review`)
+    return payload.blueprint
+  }
+  async function movePhaseToComplete(projectId, previewFingerprint) {
+    const payload = await request(`/api/projects/${projectId}/phase/completion-approve`, {
+      method: 'POST', body: JSON.stringify({ preview_fingerprint: previewFingerprint }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    setToast(`${projectMap[projectId]?.name || 'Project'} phase completed`)
+    return payload.blueprint
+  }
+  async function updatePhaseDependencies(projectId, phaseId, dependsOnOrdinals) {
+    const payload = await request(`/api/projects/${projectId}/phases/${phaseId}/dependencies`, {
+      method: 'POST', body: JSON.stringify({ depends_on_ordinals: dependsOnOrdinals }),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    setToast(`${projectMap[projectId]?.name || 'Project'} phase dependencies updated`)
+    return payload.blueprint
+  }
+  async function openBlueprintDocument(projectId) {
+    try {
+      const payload = await request(`/api/projects/${projectId}/blueprint/content`, {
+        headers: { 'X-Cortex-Action-Token': data.action_token },
+      })
+      setBlueprintDocumentPayload({ ...(projectMap[projectId] ? { project: projectMap[projectId] } : {}), ...payload })
+      return payload
+    } catch (err) {
+      setError(err.message)
+      return null
+    }
   }
   async function removeProject(projectId, confirmation) {
     const projectName = projectMap[projectId]?.name || 'Project'
@@ -628,7 +818,7 @@ export default function App() {
       headers: { 'X-Cortex-Action-Token': data.action_token },
     })
     setSelectedId(null)
-    if (timelineProjectId === projectId) setTimelineProjectId(null)
+    if (projectContextId === projectId) setProjectContextId(null)
     await load(true)
     setToast(`${projectName} removed from Cortex; repository left untouched`)
     return payload
@@ -661,13 +851,32 @@ export default function App() {
   }
 
   function changeNav(next) {
-    if (next === 'timeline') setTimelineProjectId(null)
+    if (next === 'projects') setProjectContextId(null)
     if (next === 'timeline' || next === 'roadmap') setSelectedId(null)
     setActiveNav(next)
   }
 
+  function selectProject(projectId) {
+    setProjectContextId(projectId)
+    setSelectedId(projectId)
+  }
+
+  function selectSidebarProject(projectId) {
+    setProjectContextId(projectId)
+    if (activeNav === 'roadmap' || activeNav === 'timeline') {
+      setSelectedId(null)
+      return
+    }
+    setSelectedId(projectId)
+  }
+
+  function changeProjectContext(projectId) {
+    setProjectContextId(projectId || null)
+    setSelectedId(null)
+  }
+
   function openProjectTimeline(projectId) {
-    setTimelineProjectId(projectId)
+    setProjectContextId(projectId)
     setSelectedId(null)
     setActiveNav('timeline')
   }
@@ -676,32 +885,54 @@ export default function App() {
   if (!data) return <div className="app-loading error"><CircleAlert size={24} /><strong>Dashboard unavailable</strong><span>{error}</span><button onClick={() => load()}><RotateCcw size={15} />Retry</button></div>
 
   return <div className="app-shell">
-    <Sidebar data={data} active={activeNav} onChange={changeNav} selectedId={selectedId} onSelect={setSelectedId} onAddProject={() => setShowAddProject(true)} />
+    <Sidebar data={data} active={activeNav} onChange={changeNav} selectedId={projectContextId} onSelect={selectSidebarProject} onAddProject={() => setShowAddProject(true)} />
     <div className={`content-shell ${selected ? 'drawer-open' : ''}`}><main>
       <header className="topbar"><div><span className="eyebrow">Local AI control plane</span><strong>Cortex Portfolio</strong></div><div><label className="search"><Search size={15} /><input aria-label="Search projects" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search projects" /></label><button className="icon-button" onClick={() => load()} aria-label="Refresh"><RefreshCw size={16} /></button></div></header>
       {error && <div className="error-banner"><CircleAlert size={15} /><span>{error}</span><button onClick={() => setError('')}><X size={14} /></button></div>}
       {(job || serverRunningJobs.length > 0) && <div className="job-banner"><LoaderCircle className="spin" size={16} /><span><strong>{job?.label || pretty(serverRunningJobs[0]?.kind || 'Worker')}</strong> is active. Execution activity below shows the worker and elapsed time.</span></div>}
       <div className="main-content">
-        {activeNav === 'timeline' ? <EvidenceTimeline runs={data.runs || []} activity={data.activity || []} project={timelineProject} onView={setSelectedRun} onClearProject={() => setTimelineProjectId(null)} /> : activeNav === 'roadmap' ? <RoadmapView tasks={data.roadmap_tasks || []} projects={data.projects || []} onSaveTask={saveTaskSchedule} /> : <>
+        {activeNav === 'timeline' ? <EvidenceTimeline runs={data.runs || []} activity={data.activity || []} project={projectContext} onView={setSelectedRun} onClearProject={() => changeProjectContext(null)} /> : activeNav === 'roadmap' ? <RoadmapView tasks={data.roadmap_tasks || []} projects={data.projects || []} projectId={projectContextId || ''} onProjectChange={changeProjectContext} onSaveTask={saveTaskSchedule} /> : <>
           <Hero planner={planner} setPlanner={setPlanner} onContinue={continueWork} busy={Boolean(job) || serverRunningJobs.length > 0} onManual={() => setManualProject(null)} />
           <div className="summary-line"><span><strong>{data.summary.needs_decision}</strong> need you</span><span><strong>{data.summary.working}</strong> assigned / working</span><span><strong>{data.summary.recommendations}</strong> ready to approve</span><span><strong>{data.summary.active_projects}</strong> active projects</span><em>Plans are cached to conserve tokens</em></div>
           <TeamPanel team={data.team || []} onKeepWorking={keepTeamWorking} busy={Boolean(job) || serverRunningJobs.length > 0} />
-          <DecisionLane tasks={decisions} projects={projectMap} onSelect={setSelectedId} onViewRun={setSelectedRun} />
-          <WorkingLane tasks={working} projects={projectMap} onStart={startTask} onSelect={setSelectedId} />
+          <DecisionLane tasks={decisions} projects={projectMap} onSelect={selectProject} onViewRun={setSelectedRun} />
+          <WorkingLane tasks={working} projects={projectMap} onStart={startTask} onSelect={selectProject} />
           <RunActivity runs={visibleRuns} onView={setSelectedRun} />
-          <RecommendationLane suggestions={suggestions} projects={projectMap} selectedProject={selected} onApprove={approveSuggestion} onDismiss={dismissSuggestion} onPlan={() => planProject(selectedId)} planning={job?.label === 'Planning' || serverRunningJobs.some(item => item.kind === 'plan')} />
+          <RecommendationLane suggestions={suggestions} projects={projectMap} selectedProject={selected || projectContext} onApprove={approveSuggestion} onDismiss={dismissSuggestion} onPlan={() => planProject()} planning={job?.label === 'Planning' || serverRunningJobs.some(item => item.kind === 'plan')} />
           <HealthPanel data={data} onGitRefresh={refreshGit} busy={job?.label === 'Checking GitHub' || serverRunningJobs.some(item => item.kind === 'git')} />
-          <ProjectsTable projects={filteredProjects} selectedId={selectedId} onSelect={setSelectedId} onPlan={id => planProject(id)} />
+          <ProjectsTable projects={filteredProjects} selectedId={projectContextId} onSelect={selectProject} onPlan={id => planProject(id)} />
         </>}
         <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges or external actions</span></footer>
       </div>
-    </main><ProjectDrawer project={selected} onClose={() => setSelectedId(null)} onPlan={planProject} onTaskUpdate={updateTask} onStart={startTask} onManual={id => setManualProject(id)} onAllowlist={updateAllowlist} onTimeline={openProjectTimeline} onCodex={previewCodex} onGithub={previewGithub} onRemove={setRemovalProject} /></div>
+    </main><ProjectDrawer
+      project={selected}
+      onClose={() => setSelectedId(null)}
+      onPlan={planProject}
+      onTaskUpdate={updateTask}
+      onStart={startTask}
+      onManual={id => setManualProject(id)}
+      onAllowlist={updateAllowlist}
+      onTimeline={openProjectTimeline}
+      onCodex={previewCodex}
+      onGithub={previewGithub}
+      onRemove={setRemovalProject}
+      onBlueprint={setBlueprintProjectId}
+      onDecompose={setPhasePreviewProjectId}
+      onDependencies={setPhaseDependencyProjectId}
+      onEvidence={setPhaseEvidenceProjectId}
+      onViewBlueprintDocument={openBlueprintDocument}
+    /></div>
     {manualProject !== undefined && <ManualTaskModal projects={data.projects} initialProject={manualProject || ''} onClose={() => setManualProject(undefined)} onCreated={async () => { setManualProject(undefined); setToast('Manual task added'); await load(true) }} />}
     <RunModal run={selectedRun} onClose={() => setSelectedRun(null)} />
     <CodexLaunchModal launch={codexLaunch} onClose={() => setCodexLaunch(null)} onCopied={() => setToast('Bounded Codex prompt copied')} />
     <GitHubMirrorModal launch={githubLaunch} onClose={() => setGithubLaunch(null)} onCopied={kind => setToast(kind === 'resume' ? 'Recovery command copied; review before running' : 'Approved apply command copied; review before running')} />
-    {showAddProject && <AddProjectModal onClose={() => setShowAddProject(false)} onPreview={previewProject} onRegister={registerProject} />}
+    {showAddProject && <AddProjectModal onClose={() => setShowAddProject(false)} onBrowse={browseProject} onPreview={previewProject} onRegister={registerProject} />}
     {removalProject && <RemoveProjectModal project={removalProject} onClose={() => setRemovalProject(null)} onPreview={previewProjectRemoval} onRemove={removeProject} />}
+    {blueprintProject && <BlueprintOnboardingModal project={blueprintProject} onClose={() => setBlueprintProjectId(null)} onStart={startBlueprint} onSave={saveBlueprintDraft} onPreview={previewBlueprintDraft} onApprove={approveBlueprint} />}
+    {phasePreviewProject && <PhaseDecompositionModal project={phasePreviewProject} onClose={() => setPhasePreviewProjectId(null)} onPreview={previewPhaseDecomposition} onApprove={approvePhaseDecomposition} />}
+    {phaseDependencyProject && <PhaseDependencyModal project={phaseDependencyProject} onClose={() => setPhaseDependencyProjectId(null)} onSave={updatePhaseDependencies} />}
+    {phaseEvidenceProject && <PhaseEvidenceModal project={phaseEvidenceProject} onClose={() => setPhaseEvidenceProjectId(null)} onLoad={loadPhaseEvidence} onAccept={acceptPhaseEvidence} onMoveReview={movePhaseToReview} onMoveComplete={movePhaseToComplete} />}
+    {blueprintDocumentPayload && <BlueprintDocumentModal payload={blueprintDocumentPayload} onClose={() => setBlueprintDocumentPayload(null)} />}
     {toast && <div className="toast"><Check size={15} />{toast}</div>}
   </div>
 }

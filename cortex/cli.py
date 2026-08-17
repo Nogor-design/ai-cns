@@ -32,6 +32,8 @@ from . import (
     ids,
     pm as pm_mod,
     policy,
+    project_blueprints,
+    project_registration,
     routing as routing_mod,
     runs as runs_mod,
     state as state_mod,
@@ -1331,6 +1333,115 @@ def project_list():
             f"{p['program']:<14} {p['privacy']:<10} {marker}{allowed:<28} {p['repo_path']}"
         )
     typer.echo("\n* = default allowlist; set one with `cortex project workers <id> ...`")
+
+
+@project_app.command("onboard")
+def project_onboard(
+    repo_path: str = typer.Argument(..., help="Absolute project folder to onboard."),
+    name: str = typer.Option(None, "--name", help="Project name for a new registration."),
+    privacy: str = typer.Option(None, "--privacy", help="public | internal | restricted."),
+    workers_csv: str = typer.Option(None, "--workers", help="Comma-separated worker allowlist."),
+    scaffold_state: bool = typer.Option(
+        True, "--state/--no-state", help="Create a starter state file for a new project."
+    ),
+    draft_only: bool = typer.Option(
+        False, "--draft-only", help="Save answers and preview without asking for approval."
+    ),
+):
+    """Guide one project from local discovery to an approved blueprint."""
+    conn = _conn()
+    try:
+        registration_preview = project_registration.preview(conn, repo_path)
+        if registration_preview["already_registered"]:
+            project_id = registration_preview["existing_project_id"]
+        else:
+            project_name = name or typer.prompt(
+                "Project name", default=registration_preview["suggested_name"]
+            )
+            selected_privacy = privacy or typer.prompt("Privacy", default="internal")
+            selected_privacy = selected_privacy.strip().lower()
+            if selected_privacy not in store.PRIVACY_LEVELS:
+                raise ValueError("privacy must be public, internal, or restricted")
+            default_workers = policy.DEFAULT_BY_PRIVACY[selected_privacy]
+            selected_workers = workers_csv or typer.prompt(
+                "Workers allowed to read this repository",
+                default=",".join(default_workers),
+            )
+            workers_list = [
+                part.strip()
+                for part in selected_workers.replace(",", " ").split()
+                if part.strip()
+            ]
+            registered = project_registration.register(conn, {
+                "repo_path": registration_preview["repo_path"],
+                "name": project_name,
+                "program": "general",
+                "priority": 3,
+                "privacy": selected_privacy,
+                "stack": registration_preview["stack"],
+                "test_command": registration_preview["test_command"],
+                "allowed_workers": workers_list,
+                "track_state": scaffold_state,
+            })
+            project_id = registered["project"]["id"]
+            typer.secho(f"registered project '{project_id}'", fg=typer.colors.GREEN)
+
+        draft = project_blueprints.draft_detail(conn, project_id)
+        prepared = draft.get("preview") if draft["stage"] == "review" else None
+        if prepared:
+            typer.echo("\nResuming the exact saved blueprint approval preview.")
+        else:
+            answers = dict(draft["answers"])
+            typer.echo(
+                "\nCortex inspected bounded local repository evidence and contacted no provider."
+            )
+            typer.echo(f"discovery: {draft['discovery_hash']}")
+            for question in draft["questions"]:
+                current = answers.get(question["key"])
+                answers[question["key"]] = typer.prompt(
+                    question["label"], default=current or None
+                ).strip()
+            typer.echo("\nCurrent phase")
+            for question in draft["phase_questions"]:
+                current = answers.get(question["key"])
+                answers[question["key"]] = typer.prompt(
+                    question["label"], default=current or None
+                ).strip()
+            project_blueprints.begin_draft(
+                conn, project_id, answers=answers, stage="planning"
+            )
+            project = store.get_project(conn, project_id)
+            if not project["current_goal"]:
+                store.update_project(
+                    conn, project_id, current_goal=answers["desired_outcome"]
+                )
+            prepared = project_blueprints.draft_preview(conn, project_id)
+    except (store.NotFound, ValueError) as exc:
+        _err(str(exc))
+
+    typer.echo("\n--- Blueprint approval preview ---\n")
+    typer.echo(prepared["markdown"])
+    typer.echo("Phases:")
+    for phase in prepared["phases"]:
+        typer.echo(f"  {phase['ordinal']}. [{phase['status']}] {phase['name']} — {phase['outcome']}")
+    typer.echo(f"Preview fingerprint: {prepared['preview_fingerprint']}")
+    typer.echo("No execution tasks were generated and no provider was contacted.")
+    if draft_only or not typer.confirm("Approve this exact blueprint and activate its first phase?"):
+        typer.secho("draft saved in review; repository blueprint was not written", fg=typer.colors.YELLOW)
+        return
+    try:
+        approved = project_blueprints.approve_draft(
+            conn,
+            project_id,
+            preview_fingerprint=prepared["preview_fingerprint"],
+            approving_actor="owner",
+        )
+    except ValueError as exc:
+        _err(str(exc))
+    typer.secho(
+        f"approved blueprint revision {approved['revision']['ordinal']} for {project_id}",
+        fg=typer.colors.GREEN,
+    )
 
 
 @project_app.command("workers")

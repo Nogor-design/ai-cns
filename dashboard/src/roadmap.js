@@ -110,10 +110,16 @@ export function classifyRoadmapTask(task) {
   }
 }
 
-export function filterRoadmapTasks(tasks, { scope = 'recent', projectId = '', today = new Date() } = {}) {
+export function filterRoadmapTasks(tasks, {
+  scope = 'recent',
+  layer = 'tasks',
+  projectId = '',
+  today = new Date(),
+} = {}) {
   const todayMs = parseRoadmapDate(today instanceof Date ? today.toISOString() : today)
   const recentFloor = todayMs - (30 * DAY_MS)
   return tasks.filter(task => {
+    if (layer !== 'all' && (task.layer || 'tasks') !== layer) return false
     if (projectId && task.project_id !== projectId) return false
     if (scope === 'all') return true
     if (!TERMINAL_STATUSES.has(task.status)) return true

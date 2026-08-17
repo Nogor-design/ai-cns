@@ -85,3 +85,39 @@ test('builds a shared axis and preserves missing dependency evidence', () => {
   assert.ok(roadmap.ticks.length >= 2)
   assert.equal(roadmap.metrics.blocked, 1)
 })
+
+test('project context filters both scheduled and off-axis roadmap work', () => {
+  const roadmap = buildRoadmap([
+    { ...base, id: 'alpha-planned', start_at: '2026-08-10', due_at: '2026-08-12' },
+    { ...base, id: 'alpha-off-axis' },
+    { ...base, id: 'beta-planned', project_id: 'beta', project_name: 'Beta', due_at: '2026-08-13' },
+  ], { scope: 'all', projectId: 'alpha', today: '2026-08-15' })
+
+  assert.deepEqual(
+    [...roadmap.scheduled, ...roadmap.unscheduled].map(task => task.id),
+    ['alpha-planned', 'alpha-off-axis'],
+  )
+})
+
+test('roadmap filter supports task, phase, and all layers', () => {
+  const roadmap = buildRoadmap([
+    { ...base, id: 'task-row', layer: 'tasks' },
+    { ...base, id: 'phase-row', layer: 'phases' },
+    { ...base, id: 'no-layer-row', title: 'Legacy row' },
+  ], { scope: 'all', layer: 'phases', today: '2026-08-15' })
+  assert.equal(roadmap.scheduled.length + roadmap.unscheduled.length, 1)
+  assert.equal(roadmap.scheduled[0]?.id || roadmap.unscheduled[0]?.id, 'phase-row')
+
+  const allRoadmap = buildRoadmap([
+    { ...base, id: 'task-row', layer: 'tasks' },
+    { ...base, id: 'phase-row', layer: 'phases' },
+  ], { scope: 'all', layer: 'all', today: '2026-08-15' })
+  assert.equal(allRoadmap.scheduled.length + allRoadmap.unscheduled.length, 2)
+
+  const defaultRoadmap = buildRoadmap([
+    { ...base, id: 'task-row', layer: 'tasks' },
+    { ...base, id: 'phase-row', layer: 'phases' },
+    { ...base, id: 'no-layer-row', title: 'Legacy row' },
+  ], { scope: 'all', today: '2026-08-15' })
+  assert.equal(defaultRoadmap.scheduled.length + defaultRoadmap.unscheduled.length, 2)
+})

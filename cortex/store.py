@@ -426,6 +426,8 @@ def create_task(
     github_project_item_id: str | None = None,
     codex_thread_id: str | None = None,
     pm_session_id: str | None = None,
+    phase_id: str | None = None,
+    exit_criterion_ref: str | None = None,
     sync_state: str | None = None,
     actor_type: str = "system",
     actor_name: str | None = None,
@@ -460,15 +462,17 @@ def create_task(
             priority, assignee, due_at, parent_id, milestone, start_at,
             target_at, progress, blocked_reason, next_action, github_issue_id,
             github_issue_number, github_issue_url, github_project_item_id,
-            codex_thread_id, pm_session_id, sync_state, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            codex_thread_id, pm_session_id, phase_id, exit_criterion_ref,
+            sync_state, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             tid, project_id, title, type, "open", brief, risk, complexity,
             acceptance, allowed_paths, budget, requested_model, effort,
             priority, assignee, due_at, parent_id, milestone, start_at,
             target_at, progress, blocked_reason, next_action, github_issue_id,
             github_issue_number, github_issue_url, github_project_item_id,
-            codex_thread_id, pm_session_id, sync_state, ts, ts,
+            codex_thread_id, pm_session_id, phase_id, exit_criterion_ref,
+            sync_state, ts, ts,
         ),
     )
     _insert_activity(
@@ -856,6 +860,10 @@ def create_suggestion(
     requires_approval: bool = False,
     source_worker: str = "deterministic",
     source_model: str | None = None,
+    blueprint_revision_id: str | None = None,
+    phase_id: str | None = None,
+    exit_criterion_ref: str | None = None,
+    commit: bool = True,
 ) -> str:
     if type not in TASK_TYPES:
         type = "other"
@@ -873,16 +881,19 @@ def create_suggestion(
            (id, project_id, title, type, status, why, brief, risk, complexity,
             acceptance, allowed_paths, budget, effort, priority, recommended_worker,
             recommended_model, action, reviewer, requires_approval,
-            source_worker, source_model, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            source_worker, source_model, blueprint_revision_id, phase_id,
+            exit_criterion_ref, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             sid, project_id, title, type, "proposed", why, brief, risk,
             complexity, acceptance, allowed_paths, budget, effort, priority,
             recommended_worker, recommended_model, action, reviewer,
-            int(requires_approval), source_worker, source_model, ts, ts,
+            int(requires_approval), source_worker, source_model,
+            blueprint_revision_id, phase_id, exit_criterion_ref, ts, ts,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return sid
 
 
@@ -900,6 +911,7 @@ def list_suggestions(
     project_id: str | None = None,
     *,
     status: str | None = "proposed",
+    phase_id: str | None = None,
 ) -> list[sqlite3.Row]:
     clauses: list[str] = []
     params: list[object] = []
@@ -909,12 +921,17 @@ def list_suggestions(
     if status:
         clauses.append("suggestions.status = ?")
         params.append(status)
+    if phase_id:
+        clauses.append("suggestions.phase_id = ?")
+        params.append(phase_id)
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
     return conn.execute(
         f"""SELECT suggestions.*, projects.name AS project_name,
                    projects.program AS project_program,
-                   projects.status AS project_status
+                   projects.status AS project_status,
+                   project_phases.name AS phase_name
             FROM suggestions JOIN projects ON projects.id = suggestions.project_id
+            LEFT JOIN project_phases ON project_phases.id = suggestions.phase_id
             {where}
             ORDER BY suggestions.priority, suggestions.created_at DESC""",
         params,
@@ -931,6 +948,7 @@ def update_suggestion(
     allowed = {
         "title", "type", "status", "why", "brief", "risk", "complexity",
         "acceptance", "allowed_paths", "budget", "effort", "priority", "task_id",
+        "blueprint_revision_id", "phase_id", "exit_criterion_ref",
     }
     unexpected = set(fields) - allowed
     if unexpected:
@@ -951,6 +969,11 @@ def convert_suggestion(conn: sqlite3.Connection, suggestion_id: str) -> str:
         return str(suggestion["task_id"])
     if suggestion["status"] != "proposed":
         raise ValueError(f"suggestion is {suggestion['status']}, not proposed")
+    from . import project_blueprints
+
+    project_blueprints.assert_execution_ready(
+        get_project(conn, suggestion["project_id"])
+    )
     task_id = create_task(
         conn,
         project_id=suggestion["project_id"],
@@ -966,6 +989,8 @@ def convert_suggestion(conn: sqlite3.Connection, suggestion_id: str) -> str:
         effort=suggestion["effort"],
         priority=suggestion["priority"],
         assignee=suggestion["recommended_worker"],
+        phase_id=suggestion["phase_id"],
+        exit_criterion_ref=suggestion["exit_criterion_ref"],
     )
     update_task(conn, task_id, status="assigned")
     update_suggestion(conn, suggestion_id, status="converted", task_id=task_id)

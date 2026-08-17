@@ -23,6 +23,19 @@ COUNT_QUERIES: dict[str, str] = {
     ),
     "jobs": "SELECT COUNT(*) FROM jobs WHERE project_id = ?",
     "project_git_checks": "SELECT COUNT(*) FROM project_git_checks WHERE project_id = ?",
+    "project_blueprint_drafts": (
+        "SELECT COUNT(*) FROM project_blueprint_drafts WHERE project_id = ?"
+    ),
+    "project_blueprint_revisions": (
+        "SELECT COUNT(*) FROM project_blueprint_revisions WHERE project_id = ?"
+    ),
+    "project_phases": "SELECT COUNT(*) FROM project_phases WHERE project_id = ?",
+    "phase_dependencies": """SELECT COUNT(*) FROM phase_dependencies
+        WHERE phase_id IN (SELECT id FROM project_phases WHERE project_id = ?)
+           OR depends_on_phase_id IN (SELECT id FROM project_phases WHERE project_id = ?)""",
+    "phase_criterion_evidence": (
+        "SELECT COUNT(*) FROM phase_criterion_evidence WHERE project_id = ?"
+    ),
 }
 
 
@@ -76,6 +89,12 @@ def preview(conn: sqlite3.Connection, project_id: str) -> dict[str, Any]:
         blockers.append(f"{running_runs} AI run(s) are still running")
     if active_pm_sessions:
         blockers.append(f"{active_pm_sessions} PM session(s) are still active")
+    active_phases = int(conn.execute(
+        "SELECT COUNT(*) FROM project_phases WHERE project_id = ? AND status = 'active'",
+        (project["id"],),
+    ).fetchone()[0])
+    if active_phases:
+        blockers.append(f"{active_phases} project phase(s) are still active")
     state_path = config.state_path(project["repo_path"])
     return {
         "project_id": project["id"],
@@ -92,6 +111,8 @@ def preview(conn: sqlite3.Connection, project_id: str) -> dict[str, Any]:
             "github_project_configured": bool(project["github_project_id"]),
             "github_linked_tasks": linked_github_tasks,
             "codex_linked_tasks": linked_codex_tasks,
+            "blueprint_path": project["blueprint_path"],
+            "blueprint_status": project["blueprint_status"],
         },
     }
 
@@ -150,6 +171,7 @@ def remove(
         conn.execute("DELETE FROM suggestions WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM decisions WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM runs WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM project_blueprint_drafts WHERE project_id = ?", (project_id,))
         conn.execute(
             """DELETE FROM task_dependencies
                WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)
@@ -157,6 +179,17 @@ def remove(
             (project_id, project_id),
         )
         conn.execute("DELETE FROM tasks WHERE project_id = ?", (project_id,))
+        conn.execute(
+            """DELETE FROM phase_dependencies
+               WHERE phase_id IN (SELECT id FROM project_phases WHERE project_id = ?)
+                  OR depends_on_phase_id IN (SELECT id FROM project_phases WHERE project_id = ?)""",
+            (project_id, project_id),
+        )
+        conn.execute(
+            "DELETE FROM phase_criterion_evidence WHERE project_id = ?", (project_id,)
+        )
+        conn.execute("DELETE FROM project_phases WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM project_blueprint_revisions WHERE project_id = ?", (project_id,))
         deleted = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,)).rowcount
         if deleted != 1:
             raise store.NotFound(f"project not found: {project_id}")

@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
-    project_registration, project_removal,
+    project_blueprints, project_registration, project_removal,
     github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
 )
 
@@ -220,6 +220,12 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     """Return the complete, evidence-backed dashboard snapshot."""
     all_project_rows = store.list_projects(conn)
     project_rows = [row for row in all_project_rows if row["status"] != "archived"]
+    for row in project_rows:
+        project_blueprints.refresh_staleness(conn, row["id"])
+    # Staleness checks may have updated status and appended evidence. Re-read
+    # before assembling this single coherent dashboard snapshot.
+    all_project_rows = store.list_projects(conn)
+    project_rows = [row for row in all_project_rows if row["status"] != "archived"]
     projects_by_id = {row["id"]: row for row in project_rows}
     health_rows = {
         row.project_id: row
@@ -272,6 +278,7 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     roadmap_payloads: list[dict[str, Any]] = []
     for task in all_task_rows:
         item = {field: task[field] for field in ROADMAP_TASK_FIELDS}
+        item["layer"] = "tasks"
         item["dependencies"] = []
         for dependency in dependencies_by_task.get(task["id"], []):
             upstream_status = task_statuses.get(dependency["depends_on_task_id"])
@@ -339,6 +346,9 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     project_payloads: list[dict[str, Any]] = []
     for project in project_rows:
         snapshot = health_rows[project["id"]]
+        blueprint = project_blueprints.projection(
+            conn, project["id"], refresh_staleness=False
+        )
         item = snapshot.to_dict()
         item.update(
             current_goal=project["current_goal"],
@@ -351,6 +361,7 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             codex_project_id=project["codex_project_id"],
             allowed_workers=list(policy.allowed_workers(project)),
             allowlist_configured=policy.is_configured(project),
+            blueprint=blueprint,
         )
         item["git_check"] = git_checks.get(project["id"])
         if item["git_check"]:
@@ -384,6 +395,54 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             }
         )
         project_payloads.append(item)
+        for phase in blueprint.get("phases", []):
+            phase_row = {
+                "id": phase["id"],
+                "project_id": project["id"],
+                "project_name": project["name"],
+                "project_program": project["program"],
+                "project_status": project["status"],
+                "title": phase["name"],
+                "status": phase["status"],
+                "priority": project["priority"],
+                "assignee": None,
+                "milestone": phase["name"],
+                "progress": phase["progress"]["percent"],
+                "start_at": phase.get("start_at"),
+                "target_at": phase.get("target_at"),
+                "due_at": phase.get("due_at"),
+                "created_at": phase.get("created_at"),
+                "updated_at": phase.get("updated_at"),
+                "completed_at": phase.get("completed_at"),
+                "blocked_reason": (
+                    "Pending dependency blockers"
+                    if any(
+                        dep.get("depends_on_status") != "complete"
+                        for dep in phase.get("depends_on", [])
+                    )
+                    else None
+                ),
+                "next_action": (
+                    "Review completion criteria"
+                    if phase["status"] == "review"
+                    else "Move to review when ready"
+                    if phase["status"] == "active"
+                    else None
+                ),
+                "parent_id": project["current_phase_id"],
+                "layer": "phases",
+                "dependencies": [],
+            }
+            for dependency in phase.get("depends_on", []):
+                phase_row["dependencies"].append({
+                    "task_id": phase["id"],
+                    "depends_on_task_id": dependency["depends_on_phase_id"],
+                    "depends_on_title": dependency["depends_on_name"],
+                    "depends_on_status": dependency["depends_on_status"],
+                    "type": "phase",
+                    "satisfied": dependency.get("depends_on_status") == "complete",
+                })
+            roadmap_payloads.append(phase_row)
 
     active_tasks = [
         task for task in task_payloads
@@ -575,6 +634,59 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 payload["action_token"] = self.server.action_token
                 self._json(HTTPStatus.OK, payload)
             return
+        parts = [part for part in unquote(path).split("/") if part]
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "projects"]
+            and parts[3:] == ["blueprint", "content"]
+        ):
+            if not self._allow_local_action():
+                return
+            with db.connect(self.server.database_path) as conn:
+                blueprint = project_blueprints.projection(
+                    conn, parts[2], refresh_staleness=False
+                )
+            path = Path(blueprint["path"])
+            if not path.is_absolute():
+                path = path.resolve()
+            if not path.exists():
+                self._json(
+                    HTTPStatus.NOT_FOUND,
+                    {
+                        "error": "blueprint file not found",
+                        "path": str(path),
+                        "status": blueprint["status"],
+                    },
+                )
+                return
+            if not path.is_file():
+                self._json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "blueprint path is not a file", "path": str(path)},
+                )
+                return
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                self._json(
+                    HTTPStatus.BAD_REQUEST,
+                    {
+                        "error": "failed to read blueprint file",
+                        "path": str(path),
+                        "message": str(exc),
+                    },
+                )
+                return
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "path": str(path),
+                    "content": content,
+                    "status": blueprint["status"],
+                    "exists": True,
+                },
+            )
+            return
         if path == "/api/activity":
             params = parse_qs(urlparse(self.path).query)
             project = params.get("project", [None])[0]
@@ -662,6 +774,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parts = [part for part in path.split("/") if part]
         try:
             body = self._body()
+            if path == "/api/projects/browse":
+                if not self._allow_local_action():
+                    return
+                selected_path = project_registration.choose_project_folder(
+                    body.get("initial_path")
+                )
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "selected": selected_path is not None,
+                        "repo_path": selected_path,
+                    },
+                )
+                return
             if path == "/api/projects/preview":
                 if not self._allow_local_action():
                     return
@@ -676,6 +802,200 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     result = project_registration.register(conn, body)
                     project = _row_dict(result.pop("project"))
                 self._json(HTTPStatus.CREATED, {"project": project, **result})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["blueprint", "draft"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.begin_draft(
+                        conn,
+                        parts[2],
+                        answers=body.get("answers"),
+                        stage=(str(body["stage"]) if body.get("stage") else None),
+                    )
+                self._json(HTTPStatus.OK, {"draft": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["blueprint", "draft-preview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.draft_preview(conn, parts[2])
+                self._json(HTTPStatus.OK, {"preview": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["blueprint", "preview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.preview(
+                        conn,
+                        parts[2],
+                        markdown=body.get("markdown"),
+                        phases=body.get("phases"),
+                        plan_basis=body.get("plan_basis"),
+                        persist_review=True,
+                    )
+                self._json(HTTPStatus.OK, {"preview": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["blueprint", "approve"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.approve_draft(
+                        conn,
+                        parts[2],
+                        preview_fingerprint=body.get("preview_fingerprint"),
+                        approving_actor="owner",
+                    )
+                self._json(HTTPStatus.OK, {"blueprint": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["phase", "decomposition-preview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.phase_decomposition_preview(
+                        conn, parts[2]
+                    )
+                self._json(HTTPStatus.OK, {"preview": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["phase", "decomposition-approve"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.approve_phase_decomposition(
+                        conn,
+                        parts[2],
+                        preview_fingerprint=body.get("preview_fingerprint"),
+                        approving_actor="owner",
+                    )
+                self._json(HTTPStatus.CREATED, {"decomposition": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["phase", "evidence-overview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.phase_evidence_overview(
+                        conn, parts[2]
+                    )
+                self._json(HTTPStatus.OK, {"evidence": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["phase", "evidence-approve"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.approve_criterion_evidence(
+                        conn,
+                        parts[2],
+                        criterion_ref=str(body.get("exit_criterion_ref") or ""),
+                        preview_fingerprint=body.get("preview_fingerprint"),
+                        approving_actor="owner",
+                    )
+                self._json(HTTPStatus.CREATED, {"acceptance": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["phase", "review-preview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.phase_review_preview(conn, parts[2])
+                self._json(HTTPStatus.OK, {"preview": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["phase", "review-approve"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.approve_phase_review(
+                        conn,
+                        parts[2],
+                        preview_fingerprint=body.get("preview_fingerprint"),
+                        approving_actor="owner",
+                    )
+                self._json(HTTPStatus.OK, {"blueprint": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["phase", "completion-preview"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.phase_completion_preview(
+                        conn, parts[2]
+                    )
+                self._json(HTTPStatus.OK, {"preview": payload})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["phase", "completion-approve"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.approve_phase_completion(
+                        conn,
+                        parts[2],
+                        preview_fingerprint=body.get("preview_fingerprint"),
+                        approving_actor="owner",
+                    )
+                self._json(HTTPStatus.OK, {"blueprint": payload})
+                return
+            if (
+                len(parts) == 6
+                and parts[:2] == ["api", "projects"]
+                and parts[3] == "phases"
+                and parts[5] == "dependencies"
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    payload = project_blueprints.update_phase_dependencies(
+                        conn,
+                        parts[2],
+                        parts[4],
+                        depends_on_ordinals=body.get("depends_on_ordinals"),
+                        approving_actor="owner",
+                    )
+                self._json(HTTPStatus.OK, {"blueprint": payload})
                 return
             if (
                 len(parts) == 4

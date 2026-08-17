@@ -61,6 +61,22 @@ def test_convert_suggestion_creates_one_assigned_task(conn, project):
     assert len(store.list_tasks(conn, project["id"])) == 1
 
 
+def test_convert_suggestion_copies_phase_criterion_links(conn, project):
+    suggestion_id = store.create_suggestion(
+        conn,
+        project_id=project["id"],
+        title="Meet the phase gate",
+        phase_id="phase-one",
+        exit_criterion_ref="exit-2",
+    )
+
+    task_id = store.convert_suggestion(conn, suggestion_id)
+
+    task = store.get_task(conn, task_id)
+    assert task["phase_id"] == "phase-one"
+    assert task["exit_criterion_ref"] == "exit-2"
+
+
 def test_codex_jsonl_response_is_parsed():
     proposals = [{
         "title": "Check launch readiness", "type": "review", "why": "Find gaps",

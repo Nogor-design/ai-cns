@@ -1,10 +1,45 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from cortex import project_registration, store
+
+
+def test_folder_picker_returns_a_valid_absolute_directory(tmp_path, monkeypatch):
+    repo = tmp_path / "picked-project"
+    repo.mkdir()
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout=f"{repo}\n", stderr="")
+
+    monkeypatch.setattr(project_registration.subprocess, "run", fake_run)
+
+    selected = project_registration.choose_project_folder(str(tmp_path))
+
+    assert selected == str(repo.resolve())
+    assert captured["command"][:2] == [project_registration.sys.executable, "-c"]
+    assert captured["kwargs"]["env"]["CORTEX_FOLDER_PICKER_INITIAL_PATH"] == str(
+        tmp_path.resolve()
+    )
+    assert "shell" not in captured["kwargs"]
+
+
+def test_folder_picker_cancel_keeps_manual_entry_available(monkeypatch):
+    monkeypatch.setattr(
+        project_registration.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    assert project_registration.choose_project_folder() is None
 
 
 def test_preview_detects_stack_test_command_and_existing_state(conn, tmp_path):

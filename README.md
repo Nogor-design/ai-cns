@@ -10,6 +10,10 @@ See `AI-CNS-V1-MVP-Spec.md` for the original design.
 For PM use, start with `PM-OPERATING-MODEL.md` and
 `PORTFOLIO-CONTROL-PLANE-RECOMMENDATION.md`.
 
+The reviewed design for guided project blueprints, workflow documentation,
+phase visibility, and later phase-to-task decomposition is in
+`docs/PROJECT-BLUEPRINTS-AND-PHASE-PLANNING.md`.
+
 ## What works now
 
 1. **AI project-manager dashboard and expert team** - one Continue action,
@@ -30,6 +34,20 @@ For PM use, start with `PM-OPERATING-MODEL.md` and
 7. **Evidence capture** - records command, output, usage metadata when exposed,
    changed files, path-scope violations, test results, and whether work later
    survived into Git history.
+8. **Project blueprint foundation** - validates and exact-hash approves a
+   versioned `.cortex/blueprint.md`, preserves owner documents, detects drift,
+   and projects one active plus planned delivery phases read-only. A resumable
+   CLI/dashboard interview asks only for missing product intent, saves local
+   answers, and shows the exact approval preview without contacting a provider.
+   Approved active phases can now preview criterion-linked suggestions; owner
+   approval creates suggestions only, and the existing suggestion gate creates
+    phase-linked tasks. Cortex then assembles review/done task and run pointers
+    for owner acceptance, derives progress only from accepted exit criteria, and
+    exact-fingerprint gates the active-to-review and review-to-complete transitions.
+    Next-phase activation is blocked by incomplete blockers and dependency blockers.
+    Exact approval previews survive dashboard restarts and approval reloads the
+    server-stored payload. The design view renders local Markdown, bundled
+    strict-mode Mermaid diagrams, and plan-basis provenance without remote scripts.
 
 No dispatcher merges work automatically.
 
@@ -98,7 +116,8 @@ build; later launches go straight to `http://127.0.0.1:8765`. Use `-Rebuild`
 after changing frontend source, `-NoOpen` to suppress browser launch, or a
 different local port with `-Port 8877`.
 
-To register another local project, click **Add** beside **Active projects**.
+To register another local project, click **Add** beside **Active projects**,
+then choose its folder with **Browse** or enter the absolute path manually.
 The guided flow validates the folder, previews detected stack and test
 metadata, lets you set privacy and allowed AI workers, and shows a final review
 before writing anything. Registration stays local, never overwrites an
@@ -250,6 +269,17 @@ an AI worker.
 
 Use `--no-state` for paused/reference projects when you do not want Cortex to
 create `.cortex/state.md` yet.
+
+For the guided, execution-held path, use the resumable blueprint interview:
+
+```powershell
+.\scripts\cortex-portfolio.ps1 project onboard D:\my-project
+```
+
+It confirms privacy and the worker allowlist before asking five material
+product-intent questions and the current phase gate. Cortex shows the exact
+Markdown, phase projection, and fingerprint before approval. Use
+`--draft-only` to save the review without writing `.cortex/blueprint.md`.
 
 ## Add, route, and preview a task
 

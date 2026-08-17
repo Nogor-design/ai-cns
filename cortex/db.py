@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 13
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS projects (
     github_project_number INTEGER,
     github_project_id TEXT,
     codex_project_id TEXT,
+    blueprint_path TEXT,
+    blueprint_hash TEXT,
+    blueprint_status TEXT NOT NULL DEFAULT 'missing',
+    current_blueprint_revision_id TEXT,
+    current_phase_id TEXT,
     updated_at    TEXT NOT NULL
 );
 
@@ -86,6 +91,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     github_project_item_id TEXT,
     codex_thread_id TEXT,
     pm_session_id  TEXT,
+    phase_id       TEXT,
+    exit_criterion_ref TEXT,
     sync_state     TEXT,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
@@ -191,6 +198,9 @@ CREATE TABLE IF NOT EXISTS suggestions (
     requires_approval  INTEGER NOT NULL DEFAULT 0,
     source_worker      TEXT NOT NULL DEFAULT 'deterministic',
     source_model       TEXT,
+    blueprint_revision_id TEXT,
+    phase_id           TEXT,
+    exit_criterion_ref TEXT,
     task_id            TEXT REFERENCES tasks(id),
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL
@@ -249,6 +259,81 @@ CREATE TABLE IF NOT EXISTS project_removals (
     evidence_json      TEXT
 );
 
+CREATE TABLE IF NOT EXISTS project_blueprint_drafts (
+    project_id      TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    stage           TEXT NOT NULL DEFAULT 'discovery',
+    answers_json    TEXT NOT NULL DEFAULT '{}',
+    discovery_hash TEXT NOT NULL,
+    discovery_json TEXT NOT NULL DEFAULT '{}',
+    preview_json    TEXT,
+    preview_fingerprint TEXT,
+    previewed_at    TEXT,
+    planning_task_id TEXT REFERENCES tasks(id),
+    pm_session_id   TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS project_blueprint_revisions (
+    id                TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    ordinal           INTEGER NOT NULL,
+    path              TEXT NOT NULL,
+    content_hash      TEXT NOT NULL,
+    markdown_content  TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'approved',
+    pm_session_id     TEXT,
+    approving_actor   TEXT NOT NULL,
+    approved_at       TEXT NOT NULL,
+    source_git_commit TEXT,
+    plan_basis_json   TEXT NOT NULL DEFAULT '{}',
+    created_at        TEXT NOT NULL,
+    UNIQUE(project_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS project_phases (
+    id                  TEXT PRIMARY KEY,
+    project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    blueprint_revision_id TEXT NOT NULL REFERENCES project_blueprint_revisions(id) ON DELETE CASCADE,
+    ordinal             INTEGER NOT NULL,
+    name                TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'planned',
+    outcome             TEXT NOT NULL,
+    non_goals           TEXT,
+    entry_criteria_json TEXT NOT NULL DEFAULT '[]',
+    exit_criteria_json  TEXT NOT NULL DEFAULT '[]',
+    start_at            TEXT,
+    target_at           TEXT,
+    completed_at        TEXT,
+    pm_session_id       TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    UNIQUE(blueprint_revision_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS phase_dependencies (
+    phase_id            TEXT NOT NULL REFERENCES project_phases(id) ON DELETE CASCADE,
+    depends_on_phase_id TEXT NOT NULL REFERENCES project_phases(id) ON DELETE CASCADE,
+    type                TEXT NOT NULL DEFAULT 'blocks',
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (phase_id, depends_on_phase_id)
+);
+
+CREATE TABLE IF NOT EXISTS phase_criterion_evidence (
+    id                    TEXT PRIMARY KEY,
+    project_id            TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    phase_id              TEXT NOT NULL REFERENCES project_phases(id) ON DELETE CASCADE,
+    blueprint_revision_id TEXT NOT NULL REFERENCES project_blueprint_revisions(id) ON DELETE CASCADE,
+    exit_criterion_ref    TEXT NOT NULL,
+    criterion_text        TEXT NOT NULL,
+    status                TEXT NOT NULL DEFAULT 'accepted',
+    evidence_json         TEXT NOT NULL,
+    preview_fingerprint   TEXT NOT NULL,
+    approving_actor       TEXT NOT NULL,
+    accepted_at           TEXT NOT NULL,
+    UNIQUE(phase_id, exit_criterion_ref, preview_fingerprint)
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
@@ -265,6 +350,14 @@ CREATE INDEX IF NOT EXISTS idx_suggestions_project ON suggestions(project_id);
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
 CREATE INDEX IF NOT EXISTS idx_project_removals_time
     ON project_removals(removed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_blueprint_revisions_project
+    ON project_blueprint_revisions(project_id, ordinal DESC);
+CREATE INDEX IF NOT EXISTS idx_project_phases_project
+    ON project_phases(project_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_phase_dependencies_upstream
+    ON phase_dependencies(depends_on_phase_id);
+CREATE INDEX IF NOT EXISTS idx_phase_criterion_evidence
+    ON phase_criterion_evidence(phase_id, exit_criterion_ref, accepted_at DESC);
 
 -- Model history for decision support: computed, never stored (spec section 4).
 -- Recreate it on connect so additive outcome semantics reach older databases.
@@ -300,6 +393,11 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "github_project_number": "INTEGER",
         "github_project_id": "TEXT",
         "codex_project_id": "TEXT",
+        "blueprint_path": "TEXT",
+        "blueprint_hash": "TEXT",
+        "blueprint_status": "TEXT NOT NULL DEFAULT 'missing'",
+        "current_blueprint_revision_id": "TEXT",
+        "current_phase_id": "TEXT",
     },
     "tasks": {
         "risk": "TEXT NOT NULL DEFAULT 'auto'",
@@ -326,6 +424,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "github_project_item_id": "TEXT",
         "codex_thread_id": "TEXT",
         "pm_session_id": "TEXT",
+        "phase_id": "TEXT",
+        "exit_criterion_ref": "TEXT",
         "sync_state": "TEXT",
     },
     "runs": {
@@ -337,9 +437,19 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     "suggestions": {
         "effort": "TEXT",
+        "blueprint_revision_id": "TEXT",
+        "phase_id": "TEXT",
+        "exit_criterion_ref": "TEXT",
     },
     "activity_events": {
         "session_id": "TEXT",
+    },
+    "project_blueprint_drafts": {
+        "planning_task_id": "TEXT REFERENCES tasks(id)",
+        "pm_session_id": "TEXT",
+        "preview_json": "TEXT",
+        "preview_fingerprint": "TEXT",
+        "previewed_at": "TEXT",
     },
 }
 
@@ -371,6 +481,10 @@ def _apply_identity_constraints(conn: sqlite3.Connection) -> None:
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_github_project_item_id
            ON tasks(github_project_item_id)
            WHERE github_project_item_id IS NOT NULL"""
+    )
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_suggestions_phase
+           ON suggestions(phase_id, exit_criterion_ref)"""
     )
 
 

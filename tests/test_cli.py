@@ -35,6 +35,69 @@ def test_init_rejects_missing_path(tmp_path):
     assert "does not exist" in r.output
 
 
+def test_project_onboard_guides_new_project_through_exact_blueprint_approval(git_repo):
+    user_input = "\n".join([
+        "",  # detected project name
+        "",  # internal privacy
+        "",  # default worker allowlist
+        "Operators need a trusted project handoff.",
+        "The owner can verify the current delivery gate.",
+        "Do not dispatch or complete tasks automatically.",
+        "Repository evidence remains local during onboarding.",
+        "No open decision currently.",
+        "Trustworthy onboarding",
+        "One approved blueprint and active phase are visible.",
+        "Exact preview is approved",
+        "y",
+    ]) + "\n"
+
+    result = runner.invoke(app, ["project", "onboard", str(git_repo)], input=user_input)
+
+    assert result.exit_code == 0, result.output
+    assert "No execution tasks were generated and no provider was contacted." in result.output
+    assert "approved blueprint revision 1" in result.output
+    assert (git_repo / ".cortex" / "blueprint.md").exists()
+    with db.connect() as conn:
+        project = store.list_projects(conn)[0]
+        assert project["blueprint_status"] == "approved"
+        tasks = store.list_tasks(conn, project["id"])
+        assert len(tasks) == 1
+        assert tasks[0]["title"] == "Build project blueprint"
+        assert tasks[0]["status"] == "done"
+
+
+def test_project_onboard_resumes_saved_exact_review_without_reasking_questions(git_repo):
+    assert _run("init", str(git_repo), "--name", "Resume Blueprint").exit_code == 0
+    answers = "\n".join([
+        "Operators need a restart-safe review.",
+        "The exact saved preview can be approved later.",
+        "Do not create tasks automatically.",
+        "All discovery stays local.",
+        "No open decision currently.",
+        "Restart-safe approval",
+        "The saved approval review survives a new CLI process.",
+        "Exact preview is approved",
+    ]) + "\n"
+    prepared = runner.invoke(
+        app,
+        ["project", "onboard", str(git_repo), "--draft-only"],
+        input=answers,
+    )
+    assert prepared.exit_code == 0, prepared.output
+    assert "draft saved in review" in prepared.output
+    assert not (git_repo / ".cortex" / "blueprint.md").exists()
+
+    resumed = runner.invoke(
+        app,
+        ["project", "onboard", str(git_repo)],
+        input="y\n",
+    )
+    assert resumed.exit_code == 0, resumed.output
+    assert "Resuming the exact saved blueprint approval preview" in resumed.output
+    assert "approved blueprint revision 1" in resumed.output
+    assert (git_repo / ".cortex" / "blueprint.md").exists()
+
+
 def test_project_worker_allowlist_can_be_inspected_and_updated(git_repo):
     r = _run(
         "init", str(git_repo), "--name", "Private App", "--privacy", "restricted",

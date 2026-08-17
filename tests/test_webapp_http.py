@@ -9,7 +9,10 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from cortex import db, github_projects, jobs, runlog, store, webapp
+from cortex import (
+    db, github_projects, jobs, project_blueprints, project_registration,
+    runlog, store, webapp,
+)
 
 
 @pytest.fixture
@@ -61,6 +64,629 @@ def test_health_and_static_app_are_served(dashboard_server):
         html = response.read().decode("utf-8")
     assert response.status == 200
     assert "Cortex test" in html
+
+
+def test_blueprint_preview_approval_and_read_only_projection_are_guarded(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "blueprint-http"
+    repo.mkdir()
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Blueprint HTTP", repo_path=str(repo)
+        )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    token = portfolio["action_token"]
+    project = next(item for item in portfolio["projects"] if item["project_id"] == project_id)
+    assert project["blueprint"]["status"] == "missing"
+
+    markdown = "# Project Blueprint\n\n" + "\n\n".join(
+        f"## {heading}\nEvidence for {heading.lower()}."
+        for heading in project_blueprints.REQUIRED_SECTIONS
+    ) + "\n"
+    phases = [{
+        "name": "Foundation", "status": "active",
+        "outcome": "The approved phase projection is visible.",
+        "exit_criteria": ["Portfolio payload exposes the phase"],
+    }]
+    headers = {"X-Cortex-Action-Token": token}
+    status, prepared = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/blueprint/preview",
+        method="POST",
+        body={"markdown": markdown, "phases": phases, "plan_basis": {"source": "test"}},
+        headers=headers,
+    )
+    assert status == 200
+    assert not (repo / ".cortex" / "blueprint.md").exists()
+    preview = prepared["preview"]
+
+    status, approved = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/blueprint/approve",
+        method="POST",
+        body={
+            "markdown": preview["markdown"],
+            "phases": preview["phases"],
+            "plan_basis": preview["plan_basis"],
+            "preview_fingerprint": preview["preview_fingerprint"],
+            "expected_current_hash": preview["expected_current_hash"],
+        },
+        headers=headers,
+    )
+    assert status == 200
+    assert approved["blueprint"]["status"] == "approved"
+
+    _, refreshed = request_json(dashboard_server, "/api/portfolio")
+    project = next(item for item in refreshed["projects"] if item["project_id"] == project_id)
+    assert project["blueprint"]["phases"][0]["name"] == "Foundation"
+
+
+def test_blueprint_http_approval_requires_a_saved_server_preview(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "blueprint-http-saved-preview"
+    repo.mkdir()
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Saved preview required", repo_path=str(repo)
+        )
+        prepared = project_blueprints.preview(
+            conn,
+            project_id,
+            markdown="# Project Blueprint\n\n" + "\n\n".join(
+                f"## {heading}\nEvidence for {heading.lower()}."
+                for heading in project_blueprints.REQUIRED_SECTIONS
+            ) + "\n",
+            phases=[{
+                "name": "Foundation",
+                "status": "active",
+                "outcome": "Only a saved server preview can be approved.",
+                "exit_criteria": ["Approval reloads stored content"],
+            }],
+        )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+
+    with pytest.raises(HTTPError) as caught:
+        request_json(
+            dashboard_server,
+            f"/api/projects/{project_id}/blueprint/approve",
+            method="POST",
+            body={
+                "markdown": prepared["markdown"],
+                "phases": prepared["phases"],
+                "plan_basis": prepared["plan_basis"],
+                "preview_fingerprint": prepared["preview_fingerprint"],
+                "expected_current_hash": prepared["expected_current_hash"],
+            },
+            headers=headers,
+        )
+    assert caught.value.code == 400
+    payload = json.loads(caught.value.read().decode("utf-8"))
+    assert payload["error"] == "no saved blueprint approval preview is ready"
+    assert not (repo / ".cortex" / "blueprint.md").exists()
+
+
+def test_blueprint_content_endpoint_returns_approved_markdown(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "blueprint-content"
+    repo.mkdir()
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Blueprint content HTTP", repo_path=str(repo)
+        )
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+    markdown = "# Project Blueprint\n\n" + "\n\n".join(
+        f"## {heading}\nEvidence for {heading.lower()}."
+        for heading in project_blueprints.REQUIRED_SECTIONS
+    ) + "\n"
+    phases = [{
+        "name": "Baseline",
+        "status": "active",
+        "outcome": "Approved markdown is readable from source document API.",
+        "exit_criteria": ["Exit criterion is linked to evidence"],
+    }]
+
+    status, preview = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/blueprint/preview",
+        method="POST",
+        body={
+            "markdown": markdown,
+            "phases": phases,
+            "plan_basis": {"source": "test"},
+        },
+        headers=headers,
+    )
+    assert status == 200
+
+    status, payload = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/blueprint/approve",
+        method="POST",
+        body={
+            "markdown": preview["preview"]["markdown"],
+            "phases": preview["preview"]["phases"],
+            "plan_basis": preview["preview"]["plan_basis"],
+            "preview_fingerprint": preview["preview"]["preview_fingerprint"],
+            "expected_current_hash": preview["preview"]["expected_current_hash"],
+        },
+        headers=headers,
+    )
+    assert status == 200
+    assert payload["blueprint"]["status"] == "approved"
+
+    status, content = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/blueprint/content",
+        headers=headers,
+    )
+    assert status == 200
+    assert content["status"] == "approved"
+    assert content["exists"] is True
+    assert content["path"] == str((repo / ".cortex" / "blueprint.md").resolve())
+    assert "## " + project_blueprints.REQUIRED_SECTIONS[0] in content["content"]
+
+
+def test_blueprint_content_endpoint_requires_action_token(dashboard_server, isolated_db, tmp_path):
+    repo = tmp_path / "blueprint-content-token"
+    repo.mkdir()
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Blueprint content token", repo_path=str(repo)
+        )
+
+    with pytest.raises(HTTPError) as caught:
+        request_json(
+            dashboard_server,
+            f"/api/projects/{project_id}/blueprint/content",
+        )
+    assert caught.value.code == 403
+
+
+def test_blueprint_content_endpoint_responds_404_for_missing_file(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "blueprint-content-missing"
+    repo.mkdir()
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Blueprint content missing", repo_path=str(repo)
+        )
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+    with pytest.raises(HTTPError) as caught:
+        request_json(
+            dashboard_server,
+            f"/api/projects/{project_id}/blueprint/content",
+            headers=headers,
+        )
+    payload = json.loads(caught.value.read().decode("utf-8"))
+    assert caught.value.code == 404
+    assert payload["error"] == "blueprint file not found"
+
+
+def test_portfolio_payload_exposes_phase_rows_in_the_roadmap_payload_with_dependencies(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "roadmap-phase-payload"
+    repo.mkdir()
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Roadmap phase payload", repo_path=str(repo)
+        )
+        preview = project_blueprints.preview(
+            conn,
+            project_id,
+            markdown="# Project Blueprint\n\n" + "\n\n".join(
+                f"## {heading}\nEvidence for {heading.lower()}."
+                for heading in project_blueprints.REQUIRED_SECTIONS
+            ) + "\n",
+            phases=[
+                {
+                    "name": "Foundation",
+                    "status": "active",
+                    "outcome": "Foundation is approved.",
+                    "entry_criteria": ["Project is available"],
+                    "exit_criteria": ["Foundation is confirmed"],
+                },
+                {
+                    "name": "Execution",
+                    "status": "planned",
+                    "outcome": "Execution follows foundation.",
+                    "entry_criteria": ["Foundation complete"],
+                    "exit_criteria": ["Execution is complete"],
+                    "depends_on_ordinals": [1],
+                },
+            ],
+        )
+        approved = project_blueprints.approve(
+            conn,
+            project_id,
+            markdown=preview["markdown"],
+            phases=preview["phases"],
+            plan_basis=preview["plan_basis"],
+            preview_fingerprint=preview["preview_fingerprint"],
+            expected_current_hash=preview["expected_current_hash"],
+        )
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    roadmap = portfolio["roadmap_tasks"]
+    rows = {item["id"]: item for item in roadmap}
+    phase_rows = [item for item in roadmap if item.get("layer") == "phases"]
+
+    assert len(phase_rows) == 2
+    assert rows[approved["phases"][0]["id"]]["layer"] == "phases"
+    assert rows[approved["phases"][1]["id"]]["layer"] == "phases"
+    assert rows[approved["phases"][1]["id"]]["dependencies"] == [{
+        "task_id": approved["phases"][1]["id"],
+        "depends_on_task_id": approved["phases"][0]["id"],
+        "depends_on_title": approved["phases"][0]["name"],
+        "depends_on_status": "active",
+        "type": "phase",
+        "satisfied": False,
+    }]
+
+
+def test_guided_blueprint_draft_endpoints_save_and_resume_without_provider_contact(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "guided-blueprint-http"
+    repo.mkdir()
+    (repo / "README.md").write_text("# Guided\n", encoding="utf-8")
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(conn, name="Guided HTTP", repo_path=str(repo))
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+    answers = {
+        "users_and_problem": "Operators need a trusted project handoff.",
+        "desired_outcome": "The owner can verify the current delivery gate.",
+        "non_goals": "Do not dispatch or complete work automatically.",
+        "constraints": "Discovery stays local during onboarding.",
+        "open_decision": "No open decision currently.",
+        "phase_name": "Trustworthy onboarding",
+        "phase_outcome": "The blueprint and active phase are visible.",
+        "phase_exit_criteria": "Exact preview is approved\nPhase rail is visible",
+    }
+
+    status, saved = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/blueprint/draft",
+        method="POST",
+        body={"answers": answers, "stage": "planning"},
+        headers=headers,
+    )
+
+    assert status == 200
+    assert saved["draft"]["answers"] == answers
+    assert saved["draft"]["planning_task_id"]
+    assert saved["draft"]["discovery"]["bounded_characters"] > 0
+    assert not (repo / ".cortex" / "blueprint.md").exists()
+
+    status, prepared = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/blueprint/draft-preview",
+        method="POST",
+        body={},
+        headers=headers,
+    )
+    assert status == 200
+    assert prepared["preview"]["plan_basis"]["provider_contacted"] is False
+    assert prepared["preview"]["writes"]["create_tasks"] is False
+
+    # Every request opens a new database connection. Reloading the draft proves
+    # the exact browser approval payload is durable rather than component state.
+    status, resumed = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/blueprint/draft",
+        method="POST",
+        body={},
+        headers=headers,
+    )
+    assert status == 200
+    assert resumed["draft"]["stage"] == "review"
+    assert resumed["draft"]["preview"] == prepared["preview"]
+
+    with pytest.raises(HTTPError) as caught:
+        request_json(
+            dashboard_server,
+            f"/api/projects/{project_id}/blueprint/approve",
+            method="POST",
+            body={"preview_fingerprint": "wrong-preview"},
+            headers=headers,
+        )
+    assert caught.value.code == 400
+
+    status, approved = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/blueprint/approve",
+        method="POST",
+        body={"preview_fingerprint": prepared["preview"]["preview_fingerprint"]},
+        headers=headers,
+    )
+    assert status == 200
+    assert approved["blueprint"]["status"] == "approved"
+    assert (repo / ".cortex" / "blueprint.md").exists()
+    with db.connect(isolated_db) as conn:
+        project = store.get_project(conn, project_id)
+        assert project["blueprint_status"] == "approved"
+        assert conn.execute(
+            "SELECT 1 FROM project_blueprint_drafts WHERE project_id=?",
+            (project_id,),
+        ).fetchone() is None
+
+
+def test_phase_decomposition_http_preview_approval_and_task_conversion(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "phase-decomposition-http"
+    repo.mkdir()
+    markdown = "# Project Blueprint\n\n" + "\n\n".join(
+        f"## {heading}\nEvidence for {heading.lower()}."
+        for heading in project_blueprints.REQUIRED_SECTIONS
+    ) + "\n"
+    phases = [{
+        "name": "Approved slice",
+        "status": "active",
+        "outcome": "The phase can be decomposed without automatic execution.",
+        "exit_criteria": ["One criterion-linked task reaches review"],
+    }]
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Phase decomposition HTTP", repo_path=str(repo)
+        )
+        prepared = project_blueprints.preview(
+            conn, project_id, markdown=markdown, phases=phases
+        )
+        blueprint = project_blueprints.approve(
+            conn,
+            project_id,
+            markdown=prepared["markdown"],
+            phases=prepared["phases"],
+            plan_basis=prepared["plan_basis"],
+            preview_fingerprint=prepared["preview_fingerprint"],
+            expected_current_hash=None,
+        )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/phase/decomposition-preview",
+        method="POST",
+        body={},
+        headers=headers,
+    )
+    assert status == 200
+    phase_preview = response["preview"]
+    assert phase_preview["writes"]["create_tasks"] is False
+    assert len(phase_preview["suggestions"]) == 1
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/phase/decomposition-approve",
+        method="POST",
+        body={"preview_fingerprint": phase_preview["preview_fingerprint"]},
+        headers=headers,
+    )
+    assert status == 201
+    suggestion_id = response["decomposition"]["suggestion_ids"][0]
+    with db.connect(isolated_db) as conn:
+        assert store.list_tasks(conn, project_id) == []
+
+    _, refreshed = request_json(dashboard_server, "/api/portfolio")
+    suggestion = next(item for item in refreshed["suggestions"] if item["id"] == suggestion_id)
+    assert suggestion["phase_name"] == "Approved slice"
+    assert suggestion["exit_criterion_ref"] == "exit-1"
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/suggestions/{suggestion_id}/approve",
+        method="POST",
+        body={"start": False},
+    )
+    assert status == 201
+    assert response["task"]["phase_id"] == blueprint["current_phase_id"]
+    assert response["task"]["exit_criterion_ref"] == "exit-1"
+    task_id = response["task"]["id"]
+    with db.connect(isolated_db) as conn:
+        store.update_task(conn, task_id, status="review")
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/phase/evidence-overview",
+        method="POST",
+        body={},
+        headers=headers,
+    )
+    assert status == 200
+    criterion = response["evidence"]["criteria"][0]
+    assert criterion["can_accept"] is True
+    assert response["evidence"]["progress"]["percent"] == 0
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/phase/evidence-approve",
+        method="POST",
+        body={
+            "exit_criterion_ref": "exit-1",
+            "preview_fingerprint": criterion["preview_fingerprint"],
+        },
+        headers=headers,
+    )
+    assert status == 201
+    assert response["acceptance"]["created"] is True
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/phase/review-preview",
+        method="POST",
+        body={},
+        headers=headers,
+    )
+    assert status == 200
+    review_preview = response["preview"]
+    assert review_preview["can_transition"] is True
+    assert review_preview["progress"]["percent"] == 100
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/phase/review-approve",
+        method="POST",
+        body={"preview_fingerprint": review_preview["preview_fingerprint"]},
+        headers=headers,
+    )
+    assert status == 200
+    assert response["blueprint"]["phases"][0]["status"] == "review"
+    assert response["blueprint"]["phases"][0]["completed_at"] is None
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/phase/completion-preview",
+        method="POST",
+        body={},
+        headers=headers,
+    )
+    assert status == 200
+    completion_preview = response["preview"]
+    assert completion_preview["phase_id"] == blueprint["current_phase_id"]
+    assert completion_preview["can_transition"] is True
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/phase/completion-approve",
+        method="POST",
+        body={"preview_fingerprint": completion_preview["preview_fingerprint"]},
+        headers=headers,
+    )
+    assert status == 200
+    assert response["blueprint"]["phases"][0]["status"] == "complete"
+    assert response["blueprint"]["phases"][0]["completed_at"] is not None
+
+
+def test_phase_dependency_update_endpoint_writes_updated_phase_projection(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "phase-dependency-update-http"
+    repo.mkdir()
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(conn, name="Phase dependency HTTP", repo_path=str(repo))
+        prepared = project_blueprints.preview(
+            conn,
+            project_id,
+            markdown="# Project Blueprint\n\n" + "\n\n".join(
+                f"## {heading}\nEvidence for {heading.lower()}."
+                for heading in project_blueprints.REQUIRED_SECTIONS
+            ) + "\n",
+            phases=[
+                {
+                    "name": "Foundation",
+                    "status": "active",
+                    "outcome": "The blueprint baseline is approved.",
+                    "entry_criteria": ["Project is available"],
+                    "exit_criteria": ["Baseline is stable"],
+                },
+                {
+                    "name": "Execution",
+                    "status": "planned",
+                    "outcome": "Execution can start from the baseline.",
+                    "entry_criteria": ["Foundation complete"],
+                    "exit_criteria": ["Execution is complete"],
+                },
+            ],
+        )
+        blueprint = project_blueprints.approve(
+            conn,
+            project_id,
+            markdown=prepared["markdown"],
+            phases=prepared["phases"],
+            plan_basis=prepared["plan_basis"],
+            preview_fingerprint=prepared["preview_fingerprint"],
+            expected_current_hash=prepared["expected_current_hash"],
+        )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+    planned_id = blueprint["phases"][1]["id"]
+    foundation_id = blueprint["phases"][0]["id"]
+
+    status, response = request_json(
+        dashboard_server,
+        f"/api/projects/{project_id}/phases/{planned_id}/dependencies",
+        method="POST",
+        body={"depends_on_ordinals": [1]},
+        headers=headers,
+    )
+    assert status == 200
+    updated = next(phase for phase in response["blueprint"]["phases"] if phase["id"] == planned_id)
+    assert [dep["depends_on_ordinal"] for dep in updated["depends_on"]] == [1]
+    with db.connect(isolated_db) as conn:
+        persisted = conn.execute(
+            """
+            SELECT depends_on_phase_id
+            FROM phase_dependencies
+            WHERE phase_id=?
+            """,
+            (planned_id,),
+        ).fetchone()
+    assert persisted is not None
+    assert persisted[0] == foundation_id
+
+
+def test_phase_dependency_update_endpoint_requires_action_token(dashboard_server, isolated_db, tmp_path):
+    repo = tmp_path / "phase-dependency-update-token"
+    repo.mkdir()
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Phase dependency HTTP token", repo_path=str(repo)
+        )
+        prepared = project_blueprints.preview(
+            conn,
+            project_id,
+            markdown="# Project Blueprint\n\n" + "\n\n".join(
+                f"## {heading}\nEvidence for {heading.lower()}."
+                for heading in project_blueprints.REQUIRED_SECTIONS
+            ) + "\n",
+            phases=[
+                {
+                    "name": "Foundation",
+                    "status": "active",
+                    "outcome": "The approved baseline is present.",
+                    "entry_criteria": ["Project is available"],
+                    "exit_criteria": ["Stable"],
+                },
+                {
+                    "name": "Execution",
+                    "status": "planned",
+                    "outcome": "Execution can start from the baseline.",
+                    "entry_criteria": ["Foundation complete"],
+                    "exit_criteria": ["Execution complete"],
+                },
+            ],
+        )
+        blueprint = project_blueprints.approve(
+            conn,
+            project_id,
+            markdown=prepared["markdown"],
+            phases=prepared["phases"],
+            plan_basis=prepared["plan_basis"],
+            preview_fingerprint=prepared["preview_fingerprint"],
+            expected_current_hash=prepared["expected_current_hash"],
+        )
+    planned_id = blueprint["phases"][1]["id"]
+
+    with pytest.raises(HTTPError) as caught:
+        request_json(
+            dashboard_server,
+            f"/api/projects/{project_id}/phases/{planned_id}/dependencies",
+            method="POST",
+            body={"depends_on_ordinals": [1]},
+        )
+    assert caught.value.code == 403
 
 
 def test_jobs_are_visible_through_collection_and_detail_endpoints(
@@ -212,6 +838,39 @@ def test_guided_project_preview_and_registration_require_local_action_token(
         event = store.list_activity_events(conn, "guided-http")[0]
         assert event["actor_name"] == "owner"
         assert event["source"] == "dashboard"
+
+
+def test_folder_browser_requires_local_action_token_and_returns_path(
+    dashboard_server, tmp_path, monkeypatch
+):
+    repo = tmp_path / "picked-http"
+    repo.mkdir()
+    monkeypatch.setattr(
+        project_registration,
+        "choose_project_folder",
+        lambda initial_path=None: str(repo.resolve()),
+    )
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+
+    with pytest.raises(HTTPError) as missing_token:
+        request_json(
+            dashboard_server,
+            "/api/projects/browse",
+            method="POST",
+            body={"initial_path": str(tmp_path)},
+        )
+    assert missing_token.value.code == 403
+
+    status, payload = request_json(
+        dashboard_server,
+        "/api/projects/browse",
+        method="POST",
+        body={"initial_path": str(tmp_path)},
+        headers=headers,
+    )
+    assert status == 200
+    assert payload == {"selected": True, "repo_path": str(repo.resolve())}
 
 
 def test_guarded_project_removal_preserves_repository_and_timeline_audit(

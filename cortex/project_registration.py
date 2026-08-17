@@ -5,12 +5,36 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from . import config, ids, policy, state as state_mod, store
 
 MAX_METADATA_BYTES = 1_000_000
+FOLDER_PICKER_TIMEOUT_SECONDS = 300
+
+_FOLDER_PICKER_SCRIPT = r"""
+import os
+import tkinter as tk
+from tkinter import filedialog
+
+root = tk.Tk()
+root.withdraw()
+root.attributes("-topmost", True)
+initial = os.environ.get("CORTEX_FOLDER_PICKER_INITIAL_PATH") or None
+try:
+    selected = filedialog.askdirectory(
+        parent=root,
+        title="Choose a project folder",
+        initialdir=initial,
+        mustexist=True,
+    )
+    print(selected or "", end="")
+finally:
+    root.destroy()
+"""
 
 
 def resolve_project_path(value: Any) -> Path:
@@ -27,6 +51,48 @@ def resolve_project_path(value: Any) -> Path:
     if not resolved.is_dir():
         raise ValueError(f"project folder is not a directory: {resolved}")
     return resolved
+
+
+def choose_project_folder(initial_path: Any = None) -> str | None:
+    """Open a local native directory chooser and return one absolute folder path."""
+    environment = os.environ.copy()
+    raw_initial = str(initial_path or "").strip()
+    if raw_initial:
+        try:
+            candidate = Path(raw_initial).expanduser()
+            if candidate.is_absolute() and candidate.is_dir():
+                environment["CORTEX_FOLDER_PICKER_INITIAL_PATH"] = str(
+                    candidate.resolve()
+                )
+        except (OSError, RuntimeError):
+            pass
+    environment.setdefault("PYTHONIOENCODING", "utf-8")
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", _FOLDER_PICKER_SCRIPT],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=FOLDER_PICKER_TIMEOUT_SECONDS,
+            env=environment,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(
+            "Folder picker could not be opened. Enter the full path manually."
+        ) from exc
+
+    if completed.returncode != 0:
+        raise ValueError(
+            "Folder picker is unavailable on this computer. Enter the full path manually."
+        )
+    selected = completed.stdout.strip()
+    if not selected:
+        return None
+    return str(resolve_project_path(selected))
 
 
 def _path_key(path: str | Path) -> str:

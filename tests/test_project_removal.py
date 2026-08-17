@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from cortex import ids, jobs, project_removal, store
+from cortex import ids, jobs, project_blueprints, project_removal, store
 
 
 def _seed_project_history(conn, repo):
@@ -72,6 +72,8 @@ def test_preview_reports_deleted_and_preserved_scope(conn, tmp_path):
         "github_project_configured": True,
         "github_linked_tasks": 1,
         "codex_linked_tasks": 1,
+        "blueprint_path": None,
+        "blueprint_status": "missing",
     }
 
 
@@ -97,6 +99,7 @@ def test_remove_is_transactional_preserves_repository_and_keeps_audit(conn, tmp_
     for table in (
         "tasks", "runs", "decisions", "activity_events", "suggestions",
         "github_mirror_operations", "jobs", "project_git_checks",
+        "project_blueprint_drafts", "project_blueprint_revisions", "project_phases",
     ):
         assert conn.execute(
             f"SELECT COUNT(*) FROM {table} WHERE project_id = ?", (project_id,)
@@ -170,3 +173,25 @@ def test_remove_refuses_active_jobs_and_runs(conn, tmp_path):
             acknowledge_permanent=True,
         )
     assert store.get_project(conn, project_id)["name"] == "Busy Project"
+
+
+def test_remove_deletes_resolved_blueprint_draft_before_its_planning_task(conn, tmp_path):
+    repo = tmp_path / "draft-removal"
+    repo.mkdir()
+    project_id = store.create_project(conn, name="Draft Removal", repo_path=str(repo))
+    draft = project_blueprints.begin_draft(conn, project_id)
+    store.update_task(conn, draft["planning_task_id"], status="done")
+
+    preview = project_removal.preview(conn, project_id)
+    assert preview["blocked"] is False
+    assert preview["deleted_counts"]["project_blueprint_drafts"] == 1
+
+    project_removal.remove(
+        conn,
+        project_id,
+        confirm_name="Draft Removal",
+        acknowledge_permanent=True,
+    )
+    assert conn.execute(
+        "SELECT 1 FROM project_blueprint_drafts WHERE project_id=?", (project_id,)
+    ).fetchone() is None
