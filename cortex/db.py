@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -388,6 +388,28 @@ CREATE TABLE IF NOT EXISTS inbox (
 );
 
 CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox(status, created_at);
+
+-- One row per judged write run: what the Phase 3 gate checked, what it decided,
+-- and the merge commit to revert if the owner disagrees. Kept even when nothing
+-- merged, because a rejection is the evidence that the gate is working.
+CREATE TABLE IF NOT EXISTS verifications (
+    id                 TEXT PRIMARY KEY,
+    run_id             TEXT,
+    task_id            TEXT NOT NULL REFERENCES tasks(id),
+    project_id         TEXT NOT NULL REFERENCES projects(id),
+    status             TEXT NOT NULL,      -- merged | rejected | needs_owner | error
+    checks_json        TEXT NOT NULL,
+    task_branch        TEXT,
+    integration_branch TEXT,
+    merge_commit       TEXT,
+    reverted_at        TEXT,
+    revert_commit      TEXT,
+    created_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_verifications_project
+    ON verifications(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_verifications_run ON verifications(run_id);
 
 -- What each project's own README and plan documents say, read without an agent.
 -- Rows are snapshots: re-evaluating an unchanged project bumps ``checked_at``

@@ -303,6 +303,29 @@ def changed_files(repo_path: str | Path, before: str | None) -> list[str]:
     return sorted(files)
 
 
+def diff_text(
+    repo_path: str | Path,
+    before: str | None,
+    after: str = "HEAD",
+    *,
+    max_chars: int = 60_000,
+) -> str:
+    """The committed diff between two revisions, truncated to a readable size.
+
+    Reviewers and gates read this; an unbounded diff would blow a model's
+    context and tell the owner nothing extra, so truncation is explicit and
+    visible rather than silent.
+    """
+    if not before:
+        return ""
+    code, out, _ = _run(repo_path, "diff", "--no-color", f"{before}..{after}")
+    if code != 0:
+        return ""
+    if len(out) <= max_chars:
+        return out
+    return out[:max_chars] + f"\n[... diff truncated at {max_chars} characters ...]\n"
+
+
 def diff_size(repo_path: str | Path, before: str | None) -> int:
     """Total lines changed (added + deleted) since `before`, a cheap risk signal."""
     total = 0

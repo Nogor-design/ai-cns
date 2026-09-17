@@ -11,9 +11,9 @@ from pathlib import Path
 
 from . import brief as brief_mod
 from . import (
-    autonomy, capacity, config, evidence, gitutil, ids, lanes, policy, routing,
-    model_catalog, runlog, runs, secrets_scan, project_blueprints, store, supervisor,
-    trading_guard, workers, worktrees,
+    autonomy, capacity, config, evidence, gitutil, ids, integration, lanes, policy,
+    routing, model_catalog, runlog, runs, secrets_scan, project_blueprints, store,
+    supervisor, trading_guard, verification, workers, worktrees,
 )
 
 SCHEDULER = "scheduler"
@@ -46,6 +46,8 @@ class DispatchResult:
     files_changed: tuple[str, ...]
     tests_passed: int | None
     violations: tuple[str, ...]
+    # The Phase 3 gate's report for a write run; None for read-only work.
+    verification: dict[str, object] | None = None
 
 
 def preview(
@@ -168,11 +170,15 @@ def dispatch(
     if write:
         if not allow_write:
             raise DispatchError("implementation route requires --allow-write")
+        # Write work is branched from the project's integration branch, not from
+        # the owner's main: an agent builds on what the gate has already
+        # accepted, and its branch merges back into the same place.
         try:
+            base = integration.ensure(project["repo_path"], project["id"]).branch
             workspace = worktrees.ensure(
-                project["repo_path"], project["id"], task["id"]
+                project["repo_path"], project["id"], task["id"], base=base
             ).path
-        except worktrees.WorktreeError as exc:
+        except (integration.IntegrationError, worktrees.WorktreeError) as exc:
             raise DispatchError(str(exc)) from exc
 
     run_dir = config.run_root() / task["id"]
@@ -276,14 +282,34 @@ def dispatch(
         raise DispatchError(str(exc), run_id=run_id) from exc
 
     _record_quota(conn, route.worker, result, run_id)
+    # A write run is judged by the Phase 3 gate, which commits whatever the
+    # agent left loose, checks it, and merges it into the integration branch if
+    # every check passes. A run the worker itself failed is not gated: there is
+    # nothing to judge, and the failure is the answer.
+    gate: verification.GateReport | None = None
+    if write and result.exit_code == 0:
+        gate = verification.verify(
+            conn, task, project=project, workspace=workspace, before=before,
+            producer=route.worker, run_id=run_id,
+            unattended=started_by == SCHEDULER,
+            may_merge=verification.merge_allowed(project),
+        )
     changed = gitutil.changed_files(workspace, before) if write else []
     size = gitutil.diff_size(workspace, before) if write else 0
-    violations = _path_violations(changed, task["allowed_paths"]) if write else []
-    tests_passed: int | None = None
-    if write and project["test_command"]:
+    violations = (
+        _gate_violations(gate) if gate is not None
+        else _path_violations(changed, task["allowed_paths"]) if write else []
+    )
+    tests_passed: int | None = _gate_tests(gate)
+    if write and gate is None and project["test_command"]:
         tests_passed = runs.execute_test_command(workspace, project["test_command"])
 
-    failed = result.exit_code != 0 or bool(violations) or tests_passed == 0
+    failed = (
+        result.exit_code != 0
+        or bool(violations)
+        or tests_passed == 0
+        or (gate is not None and gate.status in {"rejected", "needs_owner"})
+    )
     task_status = (
         "blocked"
         if failed
@@ -317,7 +343,8 @@ def dispatch(
         f"\n[cortex] finished with exit code {result.exit_code}; "
         f"task is now '{task_status}'.\n"
         + (f"[cortex] files changed: {', '.join(changed)}\n" if changed else "")
-        + (f"[cortex] path-scope violations: {', '.join(violations)}\n" if violations else ""),
+        + (f"[cortex] path-scope violations: {', '.join(violations)}\n" if violations else "")
+        + (f"[cortex] gate: {gate.status} - {gate.summary()}\n" if gate else ""),
     )
     return DispatchResult(
         run_id=run_id,
@@ -329,7 +356,24 @@ def dispatch(
         files_changed=tuple(changed),
         tests_passed=tests_passed,
         violations=tuple(violations),
+        verification=gate.as_dict() if gate else None,
     )
+
+
+def _gate_violations(gate: verification.GateReport) -> list[str]:
+    check = next((item for item in gate.checks if item.name == "path_scope"), None)
+    return list(check.evidence.get("violations", [])) if check else []
+
+
+def _gate_tests(gate: verification.GateReport | None) -> int | None:
+    """The gate's test result, preferring what the merged code did."""
+    if gate is None:
+        return None
+    for name in ("merged_tests", "task_tests"):
+        check = next((item for item in gate.checks if item.name == name), None)
+        if check and check.status in {verification.PASS, verification.FAIL}:
+            return 1 if check.status == verification.PASS else 0
+    return None
 
 
 def _with_owner_defaults(
