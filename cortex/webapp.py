@@ -23,10 +23,11 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
-    autonomy, autopilot, capacity, inbox, lanes, model_catalog, overlap, supervisor,
+    autonomy, autopilot, capacity, inbox, integration, lanes, model_catalog, overlap,
+    supervisor, verification,
     survey as survey_mod,
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
-    project_blueprints, project_registration, project_removal,
+    project_blueprints, project_registration, project_removal, review, settings,
     github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
 )
 
@@ -585,6 +586,37 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def integration_payload(conn: sqlite3.Connection) -> dict[str, Any]:
+    """What the gate has decided lately, per project and portfolio-wide.
+
+    Git is asked only about projects the owner allowed to auto-merge, so the
+    panel stays cheap on a portfolio where most projects never merge at all.
+    """
+    projects = []
+    for row in store.list_projects(conn):
+        if row["status"] != "active":
+            continue
+        mode = autonomy.mode(row)
+        entry: dict[str, Any] = {
+            "project_id": row["id"], "name": row["name"], "mode": mode,
+            "merge_allowed": verification.merge_allowed(row),
+            "branch": integration.BRANCH,
+        }
+        if entry["merge_allowed"]:
+            entry.update(integration.status(row["repo_path"], row["id"]))
+        projects.append(entry)
+    return {
+        "projects": projects,
+        "verifications": verification.recent(conn, limit=25),
+        "review_required": review.is_required(conn),
+        "reviewer": settings.get(conn, review.REVIEWER_KEY),
+        "protected_files": [
+            {"pattern": pattern, "reason": reason}
+            for pattern, reason in verification.PROTECTED_FILES
+        ],
+    }
+
+
 def capacity_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     """Quota, local compute and autonomy state for the capacity panel."""
     return {
@@ -785,7 +817,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/jobs":
             self._json(HTTPStatus.OK, {"jobs": self.server.list_jobs()})
             return
+        if path == "/api/integration":
+            with db.connect(self.server.database_path) as conn:
+                self._json(HTTPStatus.OK, integration_payload(conn))
+            return
         parts = [part for part in unquote(path).split("/") if part]
+        if len(parts) == 3 and parts[:2] == ["api", "verifications"]:
+            with db.connect(self.server.database_path) as conn:
+                item = verification.get(conn, parts[2])
+            if item is None:
+                self._json(HTTPStatus.NOT_FOUND, {"error": "verification not found"})
+            else:
+                self._json(HTTPStatus.OK, {"verification": item})
+            return
         if len(parts) == 3 and parts[:2] == ["api", "jobs"]:
             job = self.server.get_job(parts[2])
             if job is None:
@@ -1183,6 +1227,80 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     payload = inbox.payload(conn)
                 payload["changed"] = changed
                 self._json(HTTPStatus.OK if changed else HTTPStatus.NOT_FOUND, payload)
+                return
+            if path == "/api/integration/settings":
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    if "review_required" in body:
+                        review.set_required(conn, bool(body["review_required"]))
+                    if "reviewer" in body:
+                        settings.set_value(
+                            conn, review.REVIEWER_KEY,
+                            str(body["reviewer"] or "").strip().lower(),
+                        )
+                    self._json(HTTPStatus.OK, integration_payload(conn))
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "verify":
+                # Judging a finished write run can spend a reviewer's tokens
+                # and can merge, so it needs the same local-action proof as a
+                # dispatch.
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    run = conn.execute(
+                        "SELECT * FROM runs WHERE id = ?", (parts[2],)
+                    ).fetchone()
+                    if run is None or not run["workspace_path"]:
+                        self._json(
+                            HTTPStatus.NOT_FOUND,
+                            {"error": "no write run with a recorded workspace"},
+                        )
+                        return
+                    task = store.get_task(conn, run["task_id"])
+                    project = store.get_project(conn, run["project_id"])
+                    merge = body.get("merge")
+                    report = verification.verify(
+                        conn, task, project=project, workspace=run["workspace_path"],
+                        before=run["git_before"],
+                        producer=str(run["model"] or "").split(":", 1)[0],
+                        run_id=run["id"], unattended=False,
+                        may_merge=(
+                            verification.merge_allowed(project) if merge is None
+                            else bool(merge)
+                        ),
+                    )
+                    self._json(HTTPStatus.OK, {"verification": report.as_dict()})
+                return
+            if (
+                len(parts) == 4 and parts[:2] == ["api", "verifications"]
+                and parts[3] == "revert"
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    item = verification.get(conn, parts[2])
+                    if item is None or not item["merge_commit"]:
+                        self._json(
+                            HTTPStatus.NOT_FOUND,
+                            {"error": "no verification with a merge to undo"},
+                        )
+                        return
+                    project = store.get_project(conn, item["project_id"])
+                    try:
+                        workspace = integration.ensure(project["repo_path"], project["id"])
+                        outcome = integration.revert(workspace, item["merge_commit"])
+                    except integration.IntegrationError as exc:
+                        self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
+                        return
+                    if outcome.status != "merged":
+                        self._json(HTTPStatus.CONFLICT, {
+                            "error": outcome.detail or outcome.status,
+                            "conflicts": list(outcome.conflicts),
+                        })
+                        return
+                    verification.mark_reverted(conn, parts[2], outcome.commit or "")
+                    self._json(HTTPStatus.OK, integration_payload(conn))
                 return
             if path == "/api/team/keep-working":
                 # Unattended starts can spend subscription quota.

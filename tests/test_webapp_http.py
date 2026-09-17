@@ -1701,3 +1701,90 @@ def test_project_survey_is_readable_and_refresh_needs_the_action_token(
         method="POST", body={}, headers=headers,
     )
     assert status == 200 and payload["changed"] is False
+
+
+# -- Phase 3: the gate and the integration branch over HTTP --------------------
+
+def _repo(tmp_path, name):
+    import subprocess
+    repo = tmp_path / name
+    repo.mkdir()
+    for args in (
+        ["init", "-q"], ["config", "user.email", "t@e.st"], ["config", "user.name", "T"],
+        ["config", "commit.gpgsign", "false"],
+    ):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    (repo / "README.md").write_text("# demo\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "init"],
+                   check=True, capture_output=True)
+    return repo
+
+
+def test_integration_panel_reads_without_touching_git_for_read_only_projects(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = _repo(tmp_path, "integration-read")
+    with db.connect(isolated_db) as conn:
+        store.create_project(conn, name="Read only", repo_path=str(repo))
+
+    status, payload = request_json(dashboard_server, "/api/integration")
+
+    assert status == 200
+    entry = payload["projects"][0]
+    assert entry["mode"] == "read_only" and entry["merge_allowed"] is False
+    # Nothing was asked of Git, so there is no ahead/behind for this project.
+    assert "ahead" not in entry
+    assert payload["review_required"] is True
+    assert any(item["pattern"] == "package-lock.json" for item in payload["protected_files"])
+
+
+def test_verify_endpoint_gates_a_write_run_and_revert_undoes_it(
+    dashboard_server, isolated_db, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CORTEX_WORK_ROOT", str(tmp_path / "work"))
+    from cortex import gitutil, integration, review, worktrees
+
+    repo = _repo(tmp_path, "integration-write")
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(
+            conn, name="Writable", repo_path=str(repo), test_command=None,
+        )
+        store.update_project(conn, project_id, autonomy_mode="integration")
+        task_id = store.create_task(
+            conn, project_id=project_id, title="Add the parser", type="code",
+            acceptance="parser.py exists",
+        )
+        review.set_required(conn, False)
+        integration.ensure(repo, project_id)
+        tree = worktrees.ensure(repo, project_id, task_id, base=integration.BRANCH)
+        before = gitutil.head(tree.path)
+        (tree.path / "parser.py").write_text("parse = True\n", encoding="utf-8")
+        run_id = store.create_run(
+            conn, task_id=task_id, project_id=project_id, model="codex:default",
+            execution_mode="headless_cli", git_before=before,
+        )
+        store.update_run(conn, run_id, workspace_path=str(tree.path), exit_code=0)
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+
+    status, payload = request_json(
+        dashboard_server, f"/api/runs/{run_id}/verify", method="POST", body={}, headers=headers,
+    )
+    assert status == 200, payload
+    report = payload["verification"]
+    assert report["status"] == "merged" and report["merge_commit"]
+
+    status, panel = request_json(
+        dashboard_server, f"/api/verifications/{report['id']}/revert",
+        method="POST", body={}, headers=headers,
+    )
+    assert status == 200
+    assert panel["verifications"][0]["reverted_at"]
+
+
+def test_verify_endpoint_refuses_without_the_action_token(dashboard_server):
+    with pytest.raises(HTTPError) as excinfo:
+        request_json(dashboard_server, "/api/runs/nope/verify", method="POST", body={})
+    assert excinfo.value.code == 403
