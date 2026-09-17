@@ -11,9 +11,11 @@ from pathlib import Path
 
 from . import brief as brief_mod
 from . import (
-    config, evidence, gitutil, ids, policy, routing, runlog, runs, secrets_scan,
-    project_blueprints, store, workers, worktrees,
+    autonomy, capacity, config, evidence, gitutil, ids, lanes, policy, routing,
+    runlog, runs, secrets_scan, project_blueprints, store, workers, worktrees,
 )
+
+SCHEDULER = "scheduler"
 
 
 class DispatchError(RuntimeError):
@@ -121,6 +123,7 @@ def dispatch(
     approve_high_risk: bool = False,
     timeout: int = 1800,
     on_run_start: Callable[[str], None] | None = None,
+    started_by: str = "owner",
 ) -> DispatchResult:
     project = store.get_project(conn, task["project_id"])
     planned = preview(
@@ -146,6 +149,14 @@ def dispatch(
         )
 
     write = route.action == "implement"
+    admitted: dict[str, object] | None = None
+    if started_by == SCHEDULER:
+        # Checked here, at the last moment, as well as when candidates are
+        # chosen: settings and quota can change between the two.
+        refusal = unattended_refusal(conn, project, route)
+        if refusal:
+            raise DispatchError(refusal)
+        admitted = admission_evidence(conn, route)
     workspace = Path(project["repo_path"])
     if write:
         if not allow_write:
@@ -190,6 +201,21 @@ def dispatch(
         captured_via="cli",
         effort=route.effort,
     )
+    store.update_run(conn, run_id, started_by=started_by)
+    if started_by == SCHEDULER:
+        store.create_activity_event(
+            conn,
+            project_id=project["id"],
+            task_id=task["id"],
+            actor_type="system",
+            actor_name="cortex-scheduler",
+            model=f"{route.worker}:{route.model}",
+            action="run.unattended_start",
+            summary=f"Started unattended {route.action} with {route.worker}",
+            source="cortex-scheduler",
+            source_ref=run_id,
+            evidence=admitted,
+        )
     if on_run_start:
         on_run_start(run_id)
     runlog.start(
@@ -220,6 +246,7 @@ def dispatch(
         store.update_task(conn, task["id"], status="blocked")
         raise DispatchError(str(exc)) from exc
 
+    _record_quota(conn, route.worker, result, run_id)
     changed = gitutil.changed_files(workspace, before) if write else []
     size = gitutil.diff_size(workspace, before) if write else 0
     violations = _path_violations(changed, task["allowed_paths"]) if write else []
@@ -274,6 +301,50 @@ def dispatch(
         tests_passed=tests_passed,
         violations=tuple(violations),
     )
+
+
+def unattended_refusal(
+    conn: sqlite3.Connection, project: sqlite3.Row, route: routing.Route
+) -> str | None:
+    """Why the scheduler may not start this route now, or None."""
+    reason = autonomy.unattended_refusal(
+        conn, project, write=route.action == "implement"
+    )
+    if reason:
+        return reason
+    if route.worker in capacity.LOCAL:
+        allowed, why = lanes.admit(conn, route.model)
+        return None if allowed else why
+    admission = capacity.admit(conn, route.worker)
+    return None if admission.allowed else admission.reason
+
+
+def admission_evidence(conn: sqlite3.Connection, route: routing.Route) -> dict[str, object]:
+    """What the scheduler knew when it allowed a start, for the audit trail."""
+    if route.worker in capacity.LOCAL:
+        return {
+            "lane": lanes.lane_for(route.model),
+            "ninjatrader_running": lanes.ninjatrader_running(),
+        }
+    admission = capacity.admit(conn, route.worker)
+    return {
+        "reason": admission.reason,
+        "reserve_pct": capacity.reserve_pct(conn),
+        "windows": list(admission.windows),
+    }
+
+
+def _record_quota(
+    conn: sqlite3.Connection, worker: str, result: workers.WorkerResult, run_id: str
+) -> None:
+    """Keep provider quota readings from every run; never fail the run for it."""
+    try:
+        capacity.record(conn, capacity.readings_from_output(
+            worker, result.stdout, result.stderr,
+            exit_code=result.exit_code, source_ref=run_id,
+        ))
+    except Exception as exc:  # accounting must not lose a finished run
+        runlog.append(run_id, f"\n[cortex] quota reading not recorded: {exc}\n")
 
 
 def _path_violations(changed: list[str], allowed: str | None) -> list[str]:

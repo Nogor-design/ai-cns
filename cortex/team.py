@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
-from . import policy, routing, store, workers
+from . import autonomy, capacity, dispatcher, policy, routing, store, workers
 
 
 EXPERTS: dict[str, dict[str, Any]] = {
@@ -34,6 +34,18 @@ EXPERTS: dict[str, dict[str, Any]] = {
         "best_for": "blind spots, counterarguments, red-team review",
         "models": ["default", "grok-4.5"],
         "efforts": ["low", "medium", "high"],
+    },
+    "agy": {
+        "role": "Antigravity generalist",
+        "best_for": "second implementation opinion, broad repository tasks",
+        "models": ["default"],
+        "efforts": ["low", "medium", "high"],
+    },
+    "opencode": {
+        "role": "Local coding agent",
+        "best_for": "private tool-using work on local models, lint and small fixes",
+        "models": ["qwen3-coder:30b", "gpt-oss:20b", "devstral-small-2:latest"],
+        "efforts": [],
     },
     "ollama": {
         "role": "Private local analyst",
@@ -78,9 +90,14 @@ def team_payload(
         else:
             state = "idle"
         current = running_tasks[0] if running_tasks else queued_tasks[0] if queued_tasks else None
+        admission = capacity.admit(conn, name) if name in {
+            *capacity.METERED, *capacity.COUNTED
+        } else None
         rows.append({
             "name": name,
             **expert,
+            "quota_allowed": admission.allowed if admission else None,
+            "quota_reason": admission.reason if admission else None,
             "availability": probe["availability"],
             "probe_note": probe.get("note"),
             "state": state,
@@ -102,9 +119,19 @@ def team_payload(
 
 
 def safe_start_candidates(
-    conn: sqlite3.Connection, *, limit: int = 3
+    conn: sqlite3.Connection, *, limit: int = 3,
+    skipped: dict[str, str] | None = None,
 ) -> list[str]:
-    """One already-approved read-only task per available, non-running worker."""
+    """One already-approved read-only task per available, non-running worker.
+
+    Unattended starts also honour the autonomy policy (protected projects,
+    per-project mode, global pause), provider quota and the local model slot.
+    ``skipped`` collects a reason per withheld task for the caller to show.
+    """
+    skipped = skipped if skipped is not None else {}
+    if autonomy.is_paused(conn):
+        skipped["*"] = "Autonomy is paused by the owner."
+        return []
     projects = {row["id"]: row for row in store.list_projects(conn)}
     all_tasks = store.list_all_tasks(conn)
     limit = max(1, min(6, limit))
@@ -128,6 +155,10 @@ def safe_start_candidates(
         if route.action == "implement" or route.blocked_reason:
             continue
         if not policy.is_allowed(project, route.worker):
+            continue
+        refusal = dispatcher.unattended_refusal(conn, project, route)
+        if refusal:
+            skipped[row["id"]] = refusal
             continue
         by_worker.setdefault(route.worker, []).append(row["id"])
 

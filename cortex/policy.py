@@ -27,11 +27,13 @@ from typing import Any, Iterable
 
 # Every worker Cortex knows how to drive.
 ALL_WORKERS: tuple[str, ...] = (
-    "codex", "claude", "gemini", "grok", "ollama", "perplexity",
+    "codex", "claude", "gemini", "agy", "grok", "opencode", "ollama", "perplexity",
 )
 
 # Workers that never send repository content off this machine.
-LOCAL_WORKERS: frozenset[str] = frozenset({"ollama"})
+# opencode is included because Cortex only ever runs it against local Ollama
+# models (see workers.opencode_model).
+LOCAL_WORKERS: frozenset[str] = frozenset({"ollama", "opencode"})
 
 # Applied only when a project has no explicit allowlist yet. Restricted repos
 # stay local until their owner opts in, so an unconfigured project can never
@@ -45,7 +47,7 @@ DEFAULT_BY_PRIVACY: dict[str, tuple[str, ...]] = {
 # Order used when the router's first choice is not permitted. Earlier entries
 # are preferred. See choose_worker() for how this is applied.
 PREFERENCE_ORDER: tuple[str, ...] = (
-    "codex", "claude", "gemini", "grok", "ollama",
+    "codex", "claude", "gemini", "agy", "grok", "opencode", "ollama",
 )
 
 

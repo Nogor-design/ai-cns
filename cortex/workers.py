@@ -7,6 +7,7 @@ stdin where supported so private context is not exposed in process listings.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -15,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import ollama_client
+from . import config, ollama_client
 
 
 class WorkerError(RuntimeError):
@@ -27,6 +28,8 @@ class CommandSpec:
     worker: str
     argv: tuple[str, ...]
     uses_stdin: bool
+    # Extra environment for the child process, e.g. a Cortex-owned tool config.
+    env: tuple[tuple[str, str], ...] = ()
 
     @property
     def display(self) -> str:
@@ -186,6 +189,49 @@ def build_command(
             argv.extend(["--reasoning-effort", effort])
         return CommandSpec(worker, tuple(argv), False)
 
+    if worker == "agy":
+        # Antigravity's print mode takes the prompt as a flag value and has no
+        # plain-text stdin mode, so the prompt points at the brief file instead
+        # of carrying private context on the command line. Headless mode
+        # auto-denies anything that needs a permission prompt; without
+        # accept-edits that makes a run effectively read-only.
+        run_dir = str(Path(brief_path).parent)
+        argv = [
+            _executable("agy"), "--output-format", "stream-json", "--sandbox",
+            "--print-timeout", "60m", "--add-dir", run_dir,
+        ]
+        if write:
+            argv.extend(["--mode", "accept-edits"])
+        if model and model != "default":
+            argv.extend(["--model", model])
+        if effort:
+            argv.extend(["--effort", "high" if effort == "xhigh" else effort])
+        argv.append(
+            f"--print=Read the complete task brief at {brief_path} with view_file "
+            "and follow it. Work only inside the current workspace."
+        )
+        return CommandSpec(worker, tuple(argv), False)
+
+    if worker == "opencode":
+        # Local-only by construction: the model must be an installed Ollama
+        # model, and the provider config is Cortex-owned so the owner's own
+        # opencode settings are never edited.
+        local_model = opencode_model(model)
+        config_path = write_opencode_config(local_model)
+        # The message goes first: --file takes a list and would swallow it.
+        argv = [
+            _executable("opencode"), "run",
+            "Follow the complete task brief in the attached file.",
+            "--format", "json",
+            "--model", f"ollama/{local_model}",
+            "--agent", "build" if write else "plan",
+            "--dir", workspace, "--file", brief_path,
+        ]
+        return CommandSpec(
+            worker, tuple(argv), False,
+            env=(("OPENCODE_CONFIG", str(config_path)),),
+        )
+
     if worker == "ollama":
         return CommandSpec(worker, ("ollama", "run", model or "phi4:14b"), True)
 
@@ -243,9 +289,14 @@ def _stream_subprocess(
     timeout: int,
     emit: Callable[[str], None],
 ) -> WorkerResult:
+    env = None
+    if spec.env:
+        env = dict(os.environ)
+        env.update(dict(spec.env))
     proc = subprocess.Popen(
         list(spec.argv),
         cwd=str(workspace),
+        env=env,
         stdin=subprocess.PIPE if spec.uses_stdin else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -349,6 +400,31 @@ def humanize(worker: str, line: str) -> str | None:
             return None  # the assistant text has already been shown
         return None
 
+    if worker == "agy":
+        update = event.get("step_update")
+        if isinstance(update, dict):
+            if update.get("step_type") == "agent_response" and update.get("text_delta"):
+                return str(update["text_delta"])
+            if update.get("step_type") == "tool" and update.get("state") == "ACTIVE":
+                info = update.get("tool_info") or {}
+                name = update.get("tool_name") or "tool"
+                return f"  → {name}({_tool_hint(info.get('parameters'))})\n"
+        result = event.get("result")
+        if isinstance(result, dict) and result.get("error"):
+            return f"\n[{result.get('status') or 'error'}] {result['error']}\n"
+        return None
+
+    if worker == "opencode":
+        part = event.get("part")
+        if isinstance(part, dict):
+            if part.get("type") == "text" and part.get("text"):
+                text = str(part["text"])
+                return text if text.endswith("\n") else text + "\n"
+            if part.get("type") == "tool":
+                state = part.get("state") or {}
+                return f"  → {part.get('tool') or 'tool'}({_tool_hint(state.get('input'))})\n"
+        return None
+
     if worker == "codex":
         item = event.get("item")
         if isinstance(item, dict):
@@ -384,7 +460,10 @@ def _tool_hint(payload: object) -> str:
     """A short, non-sensitive label for what a tool call is touching."""
     if not isinstance(payload, dict):
         return ""
-    for key in ("file_path", "path", "pattern", "command", "url", "description"):
+    for key in (
+        "file_path", "path", "pattern", "command", "url", "description",
+        "AbsolutePath", "DirectoryPath", "CommandLine", "filePath",
+    ):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()[:90]
@@ -404,9 +483,23 @@ def extract_text(output: str) -> str:
     events = _json_objects(output)
     if not events:
         return output
+    # opencode streams text parts; the answer is all of them in order.
+    parts = [
+        str(event["part"].get("text") or "")
+        for event in events
+        if isinstance(event.get("part"), dict) and event["part"].get("type") == "text"
+    ]
+    if any(part.strip() for part in parts):
+        return "\n".join(part for part in parts if part.strip())
     # Claude and Gemini report a single terminal object; Codex emits a stream
     # of items and the last agent message is the answer.
     for event in reversed(events):
+        nested = event.get("result")
+        if isinstance(nested, dict):  # Antigravity
+            if str(nested.get("response") or "").strip():
+                return str(nested["response"])
+            if nested.get("error"):
+                return str(nested["error"])
         for key in ("result", "response", "text", "content"):
             value = event.get(key)
             if isinstance(value, str) and value.strip():
@@ -459,7 +552,23 @@ def _extract_usage(output: str) -> dict[str, object] | None:
                 continue
             if isinstance(parsed, dict):
                 objects.append(parsed)
+    finishes = [
+        data["part"]["tokens"] for data in objects
+        if isinstance(data.get("part"), dict)
+        and data["part"].get("type") == "step-finish"
+        and isinstance(data["part"].get("tokens"), dict)
+    ]
+    if finishes:  # opencode reports tokens per step
+        totals = {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
+        for tokens in finishes:
+            totals["input_tokens"] += int(tokens.get("input") or 0)
+            totals["output_tokens"] += int(tokens.get("output") or 0)
+            totals["reasoning_tokens"] += int(tokens.get("reasoning") or 0)
+        return dict(totals)
     for data in reversed(objects):
+        nested = data.get("result")
+        if isinstance(nested, dict) and isinstance(nested.get("usage"), dict):
+            return nested["usage"]  # Antigravity
         for key in ("stats", "usage", "modelUsage"):
             value = data.get(key)
             if isinstance(value, dict):
@@ -482,5 +591,60 @@ def _max_turns(budget: str) -> str:
     )
 
 
+DEFAULT_OPENCODE_MODEL = "qwen3-coder:30b"
+
+
+def opencode_model(model: str | None) -> str:
+    """Normalise an opencode model to a bare Ollama name, refusing cloud models."""
+    value = str(model or "").strip()
+    if not value or value == "default":
+        return DEFAULT_OPENCODE_MODEL
+    if value.startswith("ollama/"):
+        return value.split("/", 1)[1]
+    provider = value.split("/", 1)[0] if "/" in value else ""
+    if provider and ":" not in provider and provider not in _LOCAL_NAMESPACES:
+        raise WorkerError(
+            f"opencode is limited to local Ollama models; {value!r} looks like a cloud model"
+        )
+    return value
+
+
+# Ollama model namespaces that are local copies, not cloud providers.
+_LOCAL_NAMESPACES = frozenset({"trading-hub", "reecdev"})
+
+
+def write_opencode_config(model: str) -> Path:
+    """Write the Cortex-owned opencode config that exposes one local model."""
+    target = config.db_path().parent / "opencode" / "opencode.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    host = config.ollama_host().rstrip("/")
+    document = {
+        "$schema": "https://opencode.ai/config.json",
+        # Local-only: no session sharing and no self-update from unattended runs.
+        "share": "disabled",
+        "autoupdate": False,
+        "provider": {
+            "ollama": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Ollama (local)",
+                "options": {"baseURL": f"{host}/v1"},
+                "models": {model: {"name": model}},
+            }
+        },
+    }
+    text = json.dumps(document, indent=2)
+    if not target.exists() or target.read_text(encoding="utf-8") != text:
+        target.write_text(text, encoding="utf-8")
+    return target
+
+
 def _executable(worker: str) -> str:
+    if worker == "opencode" and os.name == "nt":
+        # npm installs a PowerShell/cmd shim; run the real binary instead so
+        # no script host reinterprets the arguments.
+        shim = shutil.which("opencode")
+        if shim:
+            real = Path(shim).parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+            if real.exists():
+                return str(real)
     return worker

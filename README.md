@@ -51,6 +51,24 @@ phase visibility, and later phase-to-task decomposition is in
 
 No dispatcher merges work automatically.
 
+## Unattended work guardrails
+
+`docs/AUTONOMOUS-OPERATIONS-PLAN.md` is the controlling plan for letting agents
+keep working without the owner. Phase 1 adds:
+
+- **Protected projects**: trading repositories (Trading Capability Hub registry,
+  known trading roots, `trading-systems` program, trading names) and Apollo are
+  never worked on unattended. The dashboard cannot change this.
+- **Quota reserve** (default 30%, adjustable in the dashboard or with
+  `cortex capacity reserve <pct>`): unattended runs stop when a provider window
+  would pass `100 - reserve`. Codex readings come from its session logs, Claude
+  readings from run output or a tiny probe; other CLIs are capped by run count.
+- **Local lanes**: one local model at a time, models classified by real size and
+  architecture, and only GPU-sized models while NinjaTrader is running.
+- **New workers**: `agy` (Antigravity) and `opencode` (local Ollama models only).
+- `cortex capacity show|refresh [--probe]|reserve|pause|resume|autonomy|bench`.
+
+
 ## Which worker may see which repository
 
 Privacy is enforced in exactly one place: a per-project allowlist. It answers a

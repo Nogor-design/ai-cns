@@ -21,7 +21,9 @@ from pathlib import Path
 import typer
 
 from . import (
+    autonomy,
     brief as brief_mod,
+    capacity,
     config,
     db,
     dispatcher,
@@ -30,6 +32,7 @@ from . import (
     github_reader,
     health,
     ids,
+    lanes,
     pm as pm_mod,
     policy,
     project_blueprints,
@@ -61,7 +64,12 @@ app.add_typer(task_app, name="task")
 app.add_typer(project_app, name="project")
 app.add_typer(pm_session_app, name="pm")
 app.add_typer(activity_app, name="activity")
+capacity_app = typer.Typer(
+    help="Quota reserve, local compute lanes, and unattended-work guardrails.",
+    no_args_is_help=True,
+)
 app.add_typer(github_app, name="github")
+app.add_typer(capacity_app, name="capacity")
 
 
 def _configure_console_encoding() -> None:
@@ -480,7 +488,11 @@ def keep_working(
 ):
     """Preview or start one approved read-only assignment per available expert."""
     conn = _conn()
-    task_ids = team.safe_start_candidates(conn, limit=limit)
+    capacity.refresh(conn, probe_stale=execute)
+    skipped: dict[str, str] = {}
+    task_ids = team.safe_start_candidates(conn, limit=limit, skipped=skipped)
+    for task_id, reason in skipped.items():
+        typer.echo(f"held    {task_id}  {reason}")
     if not task_ids:
         typer.echo("No safe approved assignments are waiting. Run `cortex focus` or plan a project.")
         return
@@ -491,7 +503,9 @@ def keep_working(
         typer.echo("preview only; add --execute to start these assignments")
         return
     for task_id in task_ids:
-        result = dispatcher.dispatch(conn, store.get_task(conn, task_id))
+        result = dispatcher.dispatch(
+            conn, store.get_task(conn, task_id), started_by=dispatcher.SCHEDULER
+        )
         typer.echo(f"{result.run_id}  {result.worker}:{result.model}  {result.task_status}")
 
 
@@ -1576,6 +1590,124 @@ def task_update(
     except ValueError as exc:
         _err(str(exc))
     typer.secho(f"updated task {task['id']}", fg=typer.colors.GREEN)
+
+
+
+# ------------------------------------------------------ capacity & autonomy ---
+def _print_quota(conn: sqlite3.Connection) -> None:
+    quota = capacity.payload(conn, (*capacity.METERED, *capacity.COUNTED))
+    typer.echo(f"Reserve for you: {quota['reserve_pct']:g}%  "
+               f"(expected run cost {quota['expected_run_pct']:g}%, "
+               f"{quota['counted_runs_per_5h']} unattended runs/5h on unmetered CLIs)")
+    for row in quota["providers"]:
+        mark = "ok  " if row["allowed"] else "HOLD"
+        typer.echo(f"{mark} {row['provider']:<8} {row['reason']}")
+        for window in row["windows"]:
+            used = "?" if window["used_percent"] is None else f"{window['used_percent']:g}%"
+            typer.echo(
+                f"       {window['window']:<10} {used:>7}  resets {window['resets_at'] or '-'}"
+                f"  ({window['source']}{', estimated' if window['estimated'] else ''})"
+            )
+
+
+@capacity_app.command("show")
+def capacity_show():
+    """Show quota windows, local lanes, and autonomy status."""
+    conn = _conn()
+    _print_quota(conn)
+    lane = lanes.payload(conn)
+    hw = lane["hardware"]
+    typer.echo(
+        f"\nGPU {hw['gpu_name'] or 'none'} {hw['vram_used_mb'] or 0}/{hw['vram_mb'] or 0} MiB; "
+        f"RAM {hw['ram_mb'] or 0} MiB; NinjaTrader "
+        f"{'running (hybrid models held)' if lane['ninjatrader_running'] else 'not running'}; "
+        f"local slot {'busy' if lane['slot_busy'] else 'free'}"
+    )
+    for loaded in lane["loaded"]:
+        typer.echo(f"  loaded {loaded['name']} {loaded['size_gb']} GB, {loaded['gpu_percent']}% on GPU")
+    summary = autonomy.summary(conn, store.list_projects(conn))
+    typer.echo(f"\nAutonomy {'PAUSED' if summary['paused'] else 'active'}")
+    for row in summary["projects"]:
+        note = f"  protected: {row['protected_detail']}" if row["protected"] else ""
+        typer.echo(f"  {row['mode']:<12} {row['name']}{note}")
+
+
+@capacity_app.command("refresh")
+def capacity_refresh(
+    probe: bool = typer.Option(
+        False, "--probe", help="Also run one tiny Claude turn if its reading is stale."
+    ),
+):
+    """Read the latest quota signals (Codex logs; optionally a Claude probe)."""
+    conn = _conn()
+    stored = capacity.refresh(conn, probe_stale=probe)
+    typer.echo(f"stored {stored} new reading(s)")
+    _print_quota(conn)
+
+
+@capacity_app.command("reserve")
+def capacity_reserve(
+    percent: float = typer.Argument(..., help="Share of each provider window kept for you."),
+):
+    """Set the quota reserve kept free of unattended work."""
+    conn = _conn()
+    try:
+        capacity.set_reserve_pct(conn, percent)
+    except ValueError as exc:
+        _err(str(exc))
+        raise typer.Exit(2)
+    _print_quota(conn)
+
+
+@capacity_app.command("pause")
+def capacity_pause():
+    """Stop all new unattended starts."""
+    conn = _conn()
+    autonomy.set_paused(conn, True)
+    typer.echo("Autonomy paused; in-flight runs finish or time out.")
+
+
+@capacity_app.command("resume")
+def capacity_resume():
+    """Allow unattended starts again."""
+    conn = _conn()
+    autonomy.set_paused(conn, False)
+    typer.echo("Autonomy resumed.")
+
+
+@capacity_app.command("autonomy")
+def capacity_autonomy(
+    project: str = typer.Argument(..., help="Project id or name."),
+    mode: str = typer.Argument(..., help="off | read_only | integration"),
+):
+    """Set a project's unattended-work mode (protected projects stay off)."""
+    conn = _conn()
+    row = store.get_project(conn, project)
+    try:
+        value = autonomy.validate_mode_change(row, mode)
+    except ValueError as exc:
+        _err(str(exc))
+        raise typer.Exit(2)
+    store.update_project(conn, row["id"], autonomy_mode=value)
+    typer.echo(f"{row['name']}: autonomy {value}")
+
+
+@capacity_app.command("bench")
+def capacity_bench(
+    models: list[str] = typer.Argument(..., help="Installed Ollama model names."),
+):
+    """Measure local model speed with a short fixed prompt."""
+    conn = _conn()
+    for model in models:
+        row = lanes.benchmark(conn, model)
+        if row.get("error"):
+            typer.echo(f"{model}: failed: {row['error']}")
+            continue
+        typer.echo(
+            f"{model} [{row['lane']}]: {row['output_tps']} tok/s out, "
+            f"{row['prompt_tps']} tok/s prompt, load {row['load_seconds']}s, "
+            f"{row.get('gpu_percent')}% on GPU"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
