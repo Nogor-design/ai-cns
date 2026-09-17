@@ -23,7 +23,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
-    autonomy, autopilot, capacity, inbox, lanes, supervisor,
+    autonomy, autopilot, capacity, inbox, lanes, model_catalog, supervisor,
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
     project_blueprints, project_registration, project_removal,
     github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
@@ -553,6 +553,7 @@ def capacity_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "lanes": lanes.payload(conn),
         "autonomy": autonomy.summary(conn, store.list_projects(conn)),
         "autopilot": autopilot.status(conn),
+        "worker_models": model_catalog.payload(conn),
     }
 
 
@@ -1058,6 +1059,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         capacity.set_reserve_pct(conn, float(body["reserve_pct"]))
                     if "paused" in body:
                         autonomy.set_paused(conn, bool(body["paused"]))
+                    if "worker_model" in body:
+                        target = body["worker_model"]
+                        model_catalog.set_choice(
+                            conn, str(target.get("worker")),
+                            model=target.get("model"), effort=target.get("effort"),
+                        )
                     if "max_concurrent" in body:
                         autopilot.set_max_concurrent(conn, int(body["max_concurrent"]))
                     if "inbox_daily_cap" in body:

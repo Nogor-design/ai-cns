@@ -6,13 +6,13 @@ import fnmatch
 import json
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import brief as brief_mod
 from . import (
     autonomy, capacity, config, evidence, gitutil, ids, lanes, policy, routing,
-    runlog, runs, secrets_scan, project_blueprints, store, supervisor,
+    model_catalog, runlog, runs, secrets_scan, project_blueprints, store, supervisor,
     trading_guard, workers, worktrees,
 )
 
@@ -75,6 +75,7 @@ def preview(
             routing.effective_route(project, task),
             None, model_override, action_override,
         )
+    route = _with_owner_defaults(conn, route, task, model_override, action_override)
     compiled = brief_mod.compile_brief(
         conn,
         project,
@@ -329,6 +330,26 @@ def dispatch(
         tests_passed=tests_passed,
         violations=tuple(violations),
     )
+
+
+def _with_owner_defaults(
+    conn: sqlite3.Connection,
+    route: routing.Route,
+    task: sqlite3.Row,
+    model_override: str | None,
+    action_override: str | None,
+) -> routing.Route:
+    """Apply the owner's default model and level for this worker."""
+    requested_model = task["requested_model"] if "requested_model" in task.keys() else None
+    requested_effort = task["effort"] if "effort" in task.keys() else None
+    model, effort = model_catalog.apply(
+        conn, route.worker, model=route.model, effort=route.effort,
+        model_requested=bool(model_override or requested_model),
+        effort_requested=bool(requested_effort),
+    )
+    if model == route.model and effort == route.effort:
+        return route
+    return replace(route, model=model, effort=effort)
 
 
 def _observe(run_id: str, text: str, observer: Callable[[str], None] | None) -> None:

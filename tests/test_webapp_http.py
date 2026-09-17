@@ -1614,3 +1614,33 @@ def test_autopilot_status_and_inbox_actions(dashboard_server, isolated_db, monke
     assert payload["autopilot"]["max_concurrent"] == 2
     assert payload["autopilot"]["inbox"]["daily_cap"] == 5
     assert "agy" not in payload["autopilot"]["holds"]
+
+
+def test_worker_model_choice_round_trips(dashboard_server, isolated_db, monkeypatch):
+    from cortex import capacity, lanes, model_catalog
+
+    monkeypatch.setattr(lanes, "payload", lambda conn, **kwargs: {"models": [], "loaded": []})
+    monkeypatch.setattr(capacity, "refresh", lambda conn, probe_stale=False, force=True: 0)
+
+    status, payload = request_json(dashboard_server, "/api/capacity")
+    assert status == 200
+    assert payload["worker_models"]["codex"]["selected"] == {"model": "auto", "effort": "auto"}
+    slug = payload["worker_models"]["codex"]["models"][0]["slug"]
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+    status, payload = request_json(
+        dashboard_server, "/api/capacity/settings", method="POST",
+        body={"worker_model": {"worker": "codex", "model": slug, "effort": "high"}},
+        headers=headers,
+    )
+    assert status == 200
+    assert payload["worker_models"]["codex"]["selected"] == {"model": slug, "effort": "high"}
+    with db.connect(isolated_db) as conn:
+        assert model_catalog.choice(conn, "codex")["model"] == slug
+
+    with pytest.raises(HTTPError) as bad:
+        request_json(dashboard_server, "/api/capacity/settings", method="POST",
+                     body={"worker_model": {"worker": "codex", "model": "not-a-model"}},
+                     headers=headers)
+    assert bad.value.code == 400

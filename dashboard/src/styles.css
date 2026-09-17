@@ -1008,3 +1008,7 @@ footer span:last-child { margin-left: auto; }
 .pilot-stops p { margin-top: 6px; font-size: 10px; color: #4d5c63; line-height: 1.45; }
 .pilot-stops b { color: #2c3c44; text-transform: capitalize; }
 .pilot-stops em { display: block; font-style: normal; color: #a1452f; overflow-wrap: anywhere; }
+
+.model-choice { display: flex; gap: 6px; margin-top: 7px; }
+.model-choice select { font: inherit; font-size: 10px; padding: 2px 5px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: #4d5c63; max-width: 50%; }
+.lane-hidden { margin-top: 9px; font-size: 10px; color: #8a969c; line-height: 1.45; }

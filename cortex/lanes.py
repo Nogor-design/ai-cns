@@ -320,10 +320,18 @@ def latest_benchmarks(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     return {row["model"]: dict(row) for row in rows}
 
 
-def payload(conn: sqlite3.Connection) -> dict[str, Any]:
+#: Lanes that can never run unattended agent work here, so listing them only
+#: makes the local inventory harder to read. ``admit`` refuses them as well.
+UNUSABLE_LANES = {"avoid", "embedding"}
+
+
+def payload(conn: sqlite3.Connection, *, include_unusable: bool = False) -> dict[str, Any]:
     hw = hardware()
     benches = latest_benchmarks(conn)
-    catalog = models()
+    full = models()
+    catalog = full if include_unusable else [
+        row for row in full if row.get("lane") not in UNUSABLE_LANES
+    ]
     for row in catalog:
         bench = benches.get(row["name"])
         row["output_tps"] = bench.get("output_tps") if bench else None
@@ -334,4 +342,8 @@ def payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "slot_busy": bool(local_runs_in_flight(conn)),
         "loaded": loaded_models(),
         "models": catalog,
+        "hidden_models": [
+            {"name": row["name"], "lane": row["lane"], "size_gb": row.get("size_gb")}
+            for row in full if row.get("lane") in UNUSABLE_LANES
+        ],
     }

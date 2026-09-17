@@ -16,7 +16,26 @@ async function call(path, { token, body, method = 'GET' } = {}) {
   return payload
 }
 
-function QuotaRow({ row, reserve }) {
+function ModelChoice({ worker, catalog, busy, onSave }) {
+  if (!catalog) return null
+  const { models, selected } = catalog
+  const model = models.find(entry => entry.slug === selected.model)
+  const efforts = model ? model.efforts : ['low', 'medium', 'high', 'xhigh', 'max']
+  return <div className="model-choice">
+    <select aria-label={`${worker} model`} value={selected.model} disabled={Boolean(busy)}
+      onChange={event => onSave({ worker_model: { worker, model: event.target.value } }, `${worker}-model`)}>
+      <option value="auto">Auto model</option>
+      {models.map(entry => <option key={entry.slug} value={entry.slug}>{entry.label}</option>)}
+    </select>
+    <select aria-label={`${worker} level`} value={selected.effort} disabled={Boolean(busy)}
+      onChange={event => onSave({ worker_model: { worker, effort: event.target.value } }, `${worker}-effort`)}>
+      <option value="auto">Auto level</option>
+      {efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
+    </select>
+  </div>
+}
+
+function QuotaRow({ row, reserve, catalog, busy, onSave }) {
   const ceiling = row.ceiling_pct
   const windows = row.windows.filter(window => window.window !== 'refusal' || window.limited)
   return <div className="quota-row" data-allowed={row.allowed}>
@@ -38,6 +57,7 @@ function QuotaRow({ row, reserve }) {
       </div>
     }) : <p className="quota-note">{row.kind === 'counted' ? 'No usage signal from this CLI; limited by run count.' : 'No reading yet.'}</p>}
     <p className="quota-reason">{row.reason}</p>
+    <ModelChoice worker={row.provider} catalog={catalog} busy={busy} onSave={onSave} />
   </div>
 }
 
@@ -176,7 +196,8 @@ export default function CapacityPanel({ token, onError }) {
             onKeyUp={event => save({ reserve_pct: clampReserve(event.currentTarget.value) }, 'reserve')}
             aria-label="Quota reserve percent" />
         </label>
-        {quota.providers.map(row => <QuotaRow key={row.provider} row={row} reserve={quota.reserve_pct} />)}
+        {quota.providers.map(row => <QuotaRow key={row.provider} row={row} reserve={quota.reserve_pct}
+          catalog={(payload.worker_models || {})[row.provider]} busy={busy} onSave={save} />)}
         <label className="go-limit">
           <span>OpenCode Go monthly limit ($)</span>
           <input type="number" min="1" max="10000" step="1" defaultValue={quota.opencode_go_monthly_usd}
@@ -192,6 +213,10 @@ export default function CapacityPanel({ token, onError }) {
         <p>{hw.vram_used_mb ?? '?'} / {hw.vram_mb ?? '?'} MiB GPU · {Math.round((hw.ram_mb || 0) / 1024)} GB RAM · slot {lanes.slot_busy ? 'busy' : 'free'}</p>
         {lanes.ninjatrader_running && <p className="lane-warning">NinjaTrader is running: only models that fit the GPU start unattended.</p>}
         {(lanes.loaded || []).map(model => <p key={model.name} className="lane-loaded">Loaded: {model.name} · {model.size_gb} GB · {model.gpu_percent}% GPU</p>)}
+        {(lanes.hidden_models || []).length > 0 && <p className="lane-hidden">
+          {lanes.hidden_models.length} model{lanes.hidden_models.length === 1 ? '' : 's'} hidden:
+          too large for this machine, or embedding-only.
+        </p>}
         <ul className="lane-list">
           {models.map(model => <li key={model.name} data-lane={model.lane}>
             <span>{model.name}</span><small>{model.size_gb} GB{model.output_tps ? ` · ${model.output_tps} tok/s` : ''}</small><em>{LANE_LABELS[model.lane] || model.lane}</em>

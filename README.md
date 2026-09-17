@@ -64,7 +64,14 @@ keep working without the owner. Phase 1 adds:
   would pass `100 - reserve`. Codex readings come from its session logs, Claude
   readings from run output or a tiny probe; other CLIs are capped by run count.
 - **Local lanes**: one local model at a time, models classified by real size and
-  architecture, and only GPU-sized models while NinjaTrader is running.
+  architecture, and only GPU-sized models while NinjaTrader is running. Models
+  that cannot do agent work here (too large for this machine, or embedding-only)
+  are left out of the dashboard list and refused by the lane.
+- **Cloud model and level**: pick the model and reasoning level each of Codex
+  and Claude runs at, under that provider in the capacity panel. Codex's
+  catalog is read from its own model cache, so new models appear without a code
+  change. `Auto` keeps the CLI's own default, and a task that names its own
+  model or effort still wins.
 - **New workers**: `agy` (Antigravity), `opencode` (your OpenCode Go
   subscription, default DeepSeek V4.1 Flash; takes medium code work) and
   `opencode-local` (local Ollama models only). OpenCode Go quota is tracked as
