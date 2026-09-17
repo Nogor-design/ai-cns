@@ -177,6 +177,8 @@ def _pid_is_running(pid: int | None) -> bool:
         return False
     if pid == os.getpid():
         return True
+    if os.name == "nt":
+        return _windows_pid_is_running(pid)
     try:
         os.kill(pid, 0)
     except PermissionError:
@@ -185,6 +187,33 @@ def _pid_is_running(pid: int | None) -> bool:
     except OSError:
         return False
     return True
+
+
+def _windows_pid_is_running(pid: int) -> bool:
+    # Never os.kill here: on Windows signal 0 is CTRL_C_EVENT, so the "probe"
+    # sends Ctrl+C to a process group, and fails (reads as dead) across consoles.
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    process_query_limited_information = 0x1000
+    still_active = 259
+    error_access_denied = 5
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        # Access denied means it exists but belongs to someone else.
+        return ctypes.get_last_error() == error_access_denied
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _payload(row: sqlite3.Row) -> dict[str, Any]:

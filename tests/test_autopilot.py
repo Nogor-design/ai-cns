@@ -352,3 +352,18 @@ def test_tick_files_interrupted_runs(isolated_db, conn, project):
     items = inbox.items(conn)
     assert items[0]["kind"] == "interrupted" and "Interrupted review" in items[0]["title"]
     pilot.release()
+
+
+def test_pid_probe_sees_other_processes_without_signalling_them():
+    import subprocess
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert jobs._pid_is_running(child.pid)
+        assert jobs._pid_is_running(child.pid)  # probing twice must not stop it
+        assert child.poll() is None
+    finally:
+        child.kill()
+        child.wait()
+    assert not jobs._pid_is_running(child.pid)
+    assert not jobs._pid_is_running(DEAD_PID)
