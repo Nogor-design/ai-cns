@@ -155,3 +155,16 @@ def test_register_rejects_ambiguous_registration_values(
             "allowed_workers": ["ollama"],
             "track_state": track_state,
         })
+
+
+def test_apollo_projects_cannot_be_registered(conn, tmp_path):
+    repo = tmp_path / "apollo" / "apollo-ats"
+    repo.mkdir(parents=True)
+    with pytest.raises(ValueError, match="managed outside Cortex"):
+        project_registration.preview(conn, str(repo))
+    with pytest.raises(ValueError, match="managed outside Cortex"):
+        project_registration.register(conn, {"repo_path": str(repo), "name": "apollo-ats"})
+
+    plain = tmp_path / "ordinary-app"
+    plain.mkdir()
+    assert project_registration.preview(conn, str(plain))["already_registered"] is False

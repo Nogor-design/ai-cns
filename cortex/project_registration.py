@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import config, ids, policy, state as state_mod, store
+from . import autonomy, config, ids, policy, state as state_mod, store
 
 MAX_METADATA_BYTES = 1_000_000
 FOLDER_PICKER_TIMEOUT_SECONDS = 300
@@ -185,6 +185,7 @@ def detect_project(repo: Path) -> dict[str, Any]:
 
 def preview(conn: sqlite3.Connection, repo_path: Any) -> dict[str, Any]:
     repo = resolve_project_path(repo_path)
+    _refuse_excluded(repo)
     result = detect_project(repo)
     existing = next(
         (
@@ -215,8 +216,17 @@ def _bounded(value: Any, label: str, *, required: bool = False, limit: int = 500
     return text or None
 
 
+def _refuse_excluded(repo: Path, name: Any = None) -> None:
+    """Apollo is a production application the owner manages outside Cortex."""
+    probe = {"repo_path": str(repo), "name": str(name or repo.name), "id": ""}
+    found = autonomy.protection(probe)
+    if found and found.reason == "apollo":
+        raise ValueError("Apollo projects are managed outside Cortex and cannot be registered")
+
+
 def register(conn: sqlite3.Connection, body: dict[str, Any]) -> dict[str, Any]:
     repo = resolve_project_path(body.get("repo_path"))
+    _refuse_excluded(repo, body.get("name"))
     if any(_path_key(row["repo_path"]) == _path_key(repo) for row in store.list_projects(conn)):
         raise ValueError("this project folder is already registered")
 
