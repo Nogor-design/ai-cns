@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import autonomy, config, ids, policy, state as state_mod, store
+from . import autonomy, config, ids, policy, state as state_mod, store, survey
 
 MAX_METADATA_BYTES = 1_000_000
 FOLDER_PICKER_TIMEOUT_SECONDS = 300
@@ -291,6 +291,14 @@ def register(conn: sqlite3.Connection, body: dict[str, Any]) -> dict[str, Any]:
         if state_created and state_path.is_file():
             state_path.unlink()
         raise
+
+    # Read the repository straight away, so a newly added project already
+    # explains itself instead of showing an empty card until somebody asks.
+    # Failure here must not undo a successful registration.
+    try:
+        survey.refresh(conn, store.get_project(conn, project_id))
+    except Exception:  # noqa: BLE001 - the survey is a convenience, not the record
+        pass
 
     return {
         "project": store.get_project(conn, project_id),

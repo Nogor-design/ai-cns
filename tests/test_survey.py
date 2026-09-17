@@ -170,3 +170,19 @@ def test_removing_a_project_removes_its_surveys(conn, project):
     conn.execute("DELETE FROM project_surveys WHERE project_id = ?", (project["id"],))
     conn.commit()
     assert survey.latest(conn, project["id"]) is None
+
+
+def test_registering_a_project_reads_it_immediately(conn, tmp_path):
+    from cortex import project_registration
+
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    (repo / "README.md").write_text(
+        "# Fresh\n\nFresh keeps a register of warranty claims.\n", encoding="utf-8"
+    )
+    result = project_registration.register(conn, {
+        "repo_path": str(repo), "name": "Fresh", "track_state": False,
+    })
+    stored = survey.latest(conn, result["project"]["id"])
+    assert stored is not None
+    assert stored["digest"]["does"].startswith("Fresh keeps a register")

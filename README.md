@@ -415,3 +415,33 @@ cortex state my-project --regen
 $env:PYTHONDONTWRITEBYTECODE='1'
 python -m pytest -q -p no:cacheprovider
 ```
+
+## Knowing what a project is, and whether you already built it
+
+Open any project in the dashboard and the drawer answers two questions before
+you decide anything.
+
+**What this is, and where it goes** reads the repository itself: the README for
+what it does, the plan, roadmap, blueprint or `.cortex/state.md` for where it is
+headed, the unchecked items and unfinished phases for what is still open, and
+the git history for whether the documents have kept up with the code. Phased
+plans are understood: the first phase heading not marked done is the current
+one, and its `Scope:` / `Exit:` lines are the remaining work. **Re-evaluate**
+reads it again; if nothing moved it says so rather than filing another
+identical snapshot. No agent runs and nothing is spent, so press it freely.
+A newly registered project is read at once.
+
+    cortex survey                       # every active project
+    cortex survey <project> --refresh   # re-read one
+    cortex survey <project> --synthesize   # add a local Ollama paragraph
+
+**Covers similar ground** compares every project against every other one, and
+against the Trading Capability Hub registry, so an idea is checked against what
+exists before it becomes another repository. Matching is local term overlap
+weighted by how rare a word is in *this* portfolio, so "dashboard" counts for
+little and "ninjatrader" counts for a lot. A match needs both a similarity score
+and at least two shared terms, because one shared word is a coincidence.
+
+    cortex overlap "a web app to track the decisions my team makes"
+    cortex overlap --project trader-dan-landing
+    cortex overlap                      # every overlapping pair
