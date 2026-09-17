@@ -44,6 +44,7 @@ from . import (
     state as state_mod,
     store,
     supervisor,
+    survey as survey_mod,
     team,
     workers,
     webapp,
@@ -581,6 +582,59 @@ def next_action(
 ):
     """Alias for `cortex focus`: show the next useful action without planning."""
     focus(project)
+
+
+@app.command("survey")
+def survey_command(
+    project: str = typer.Argument(None, help="Project id/name; omit for every active project."),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Re-read the repository and store a new snapshot."
+    ),
+    synthesize: bool = typer.Option(
+        False, "--synthesize", help="Add a local-model paragraph (needs Ollama)."
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit the raw digest."),
+):
+    """What a project is and where its own plan says it goes. Reads only."""
+    conn = _conn()
+    if project:
+        try:
+            targets = [store.get_project(conn, project)]
+        except store.NotFound as exc:
+            _err(str(exc))
+    else:
+        targets = [row for row in store.list_projects(conn) if row["status"] == "active"]
+        if not targets:
+            _err("no active projects")
+    payloads = []
+    for row in targets:
+        if refresh or survey_mod.latest(conn, row["id"]) is None:
+            result = survey_mod.refresh(conn, row, synthesize=synthesize)
+            stored, changed = result["survey"], result["changed"]
+        else:
+            stored, changed = survey_mod.latest(conn, row["id"]), False
+        payloads.append({"project": row["name"], "changed": changed, **stored})
+    if as_json:
+        typer.echo(json.dumps(payloads, indent=2, default=str))
+        return
+    for item in payloads:
+        digest = item["digest"]
+        typer.echo("")
+        typer.secho(item["project"], fg=typer.colors.CYAN, bold=True)
+        typer.echo(f"  does:   {digest.get('does', '-')}")
+        typer.echo(f"  plan:   {digest.get('plan_says', '-')}")
+        if digest.get("plan_source"):
+            typer.echo(f"  source: {digest['plan_source']}")
+        if digest.get("synthesis"):
+            typer.echo(f"  read:   {digest['synthesis']}")
+        for step in digest.get("next_steps", [])[:5]:
+            typer.echo(f"  next:   {step}")
+        for note in digest.get("drift", []):
+            typer.secho(f"  drift:  {note}", fg=typer.colors.YELLOW)
+        typer.echo(
+            f"  seen:   {item['checked_at']} "
+            f"({'updated' if item['changed'] else 'unchanged'}, {item['fingerprint']})"
+        )
 
 
 @app.command("plan")

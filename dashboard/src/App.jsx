@@ -9,6 +9,7 @@ import { filterAndGroupTimeline } from './timeline.js'
 import { mirrorActionLabel, mirrorStatusMeta } from './githubMirror.js'
 import { renderBlueprintMarkdown, renderBlueprintPlanBasis } from './blueprintRenderer.js'
 import { blueprintLifecycleMeta } from './blueprintLifecycle.js'
+import SurveyPanel from './SurveyPanel.jsx'
 import RoadmapView from './RoadmapView.jsx'
 import AddProjectModal from './AddProjectModal.jsx'
 import RemoveProjectModal from './RemoveProjectModal.jsx'
@@ -472,12 +473,13 @@ function BlueprintDocumentModal({ payload, onClose }) {
 function ProjectDrawer({
   project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist,
   onTimeline, onCodex, onGithub, onRemove, onBlueprint, onDecompose, onEvidence,
-  onDependencies, onViewBlueprintDocument,
+  onDependencies, onViewBlueprintDocument, onResurvey,
 }) {
   if (!project) return null
   return <aside className="drawer"><div className="drawer-head"><div><span className="project-monogram large" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span><span><small>{project.program}</small><h2>{project.name}</h2></span></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <div className="drawer-primary"><button onClick={() => onPlan(project.project_id, 'codex')}><Sparkles size={16} />Ask Codex to plan next</button><button onClick={() => onPlan(project.project_id, 'ollama')}><Cpu size={16} />Use local planner</button></div>
     <section><label>Current goal</label><p>{project.current_goal || 'No goal has been set.'}</p></section>
+    <SurveyPanel survey={project.survey} onRefresh={() => onResurvey(project.project_id)} />
     <BlueprintPanel
       blueprint={project.blueprint}
       onBuild={() => onBlueprint(project.project_id)}
@@ -679,6 +681,17 @@ export default function App() {
       setError(err.message)
       return false
     }
+  }
+  // Re-read one repository's own documents. Cheap and local: no agent runs, so
+  // this can be pressed as often as the owner wants.
+  async function resurveyProject(projectId) {
+    const result = await request(`/api/projects/${projectId}/survey/refresh`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+      headers: { 'X-Cortex-Action-Token': data.action_token },
+    })
+    await load(true)
+    return result
   }
   async function previewProject(repoPath) {
     const payload = await request('/api/projects/preview', {
@@ -937,6 +950,7 @@ export default function App() {
       onDependencies={setPhaseDependencyProjectId}
       onEvidence={setPhaseEvidenceProjectId}
       onViewBlueprintDocument={openBlueprintDocument}
+      onResurvey={resurveyProject}
     /></div>
     {manualProject !== undefined && <ManualTaskModal projects={data.projects} initialProject={manualProject || ''} onClose={() => setManualProject(undefined)} onCreated={async () => { setManualProject(undefined); setToast('Manual task added'); await load(true) }} />}
     <RunModal run={selectedRun} onClose={() => setSelectedRun(null)} />

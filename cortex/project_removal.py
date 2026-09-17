@@ -172,6 +172,7 @@ def remove(
         conn.execute("DELETE FROM decisions WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM runs WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM project_blueprint_drafts WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM project_surveys WHERE project_id = ?", (project_id,))
         conn.execute(
             """DELETE FROM task_dependencies
                WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)

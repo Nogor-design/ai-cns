@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
     autonomy, autopilot, capacity, inbox, lanes, model_catalog, supervisor,
+    survey as survey_mod,
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
     project_blueprints, project_registration, project_removal,
     github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
@@ -218,6 +219,40 @@ def github_mirror_preview(
     return base
 
 
+def _survey_summary(conn: sqlite3.Connection, project_id: str) -> dict[str, Any] | None:
+    """The stored reading of a project, trimmed for the portfolio list.
+
+    Only what a card shows; the drawer fetches the full digest on demand. The
+    disk is never touched here, so polling the portfolio stays cheap.
+    """
+    stored = survey_mod.latest(conn, project_id)
+    if stored is None:
+        return None
+    digest = stored.get("digest") or {}
+    documents = [
+        {
+            "path": doc.get("path"),
+            "kind": doc.get("kind"),
+            "open_count": len(doc.get("open_items") or []),
+        }
+        for doc in (digest.get("documents") or [])
+        if doc.get("summary") or doc.get("open_items") or doc.get("status")
+    ][:6]
+    return {
+        "documents": documents,
+        "does": digest.get("does"),
+        "plan_says": digest.get("plan_says"),
+        "plan_source": digest.get("plan_source"),
+        "synthesis": digest.get("synthesis"),
+        "next_steps": (digest.get("next_steps") or [])[:5],
+        "drift": digest.get("drift") or [],
+        "checked_at": stored.get("checked_at"),
+        "created_at": stored.get("created_at"),
+        "fingerprint": stored.get("fingerprint"),
+        "source": stored.get("source"),
+    }
+
+
 def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     """Return the complete, evidence-backed dashboard snapshot."""
     all_project_rows = store.list_projects(conn)
@@ -364,6 +399,7 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             allowed_workers=list(policy.allowed_workers(project)),
             allowlist_configured=policy.is_configured(project),
             blueprint=blueprint,
+            survey=_survey_summary(conn, project["id"]),
         )
         item["git_check"] = git_checks.get(project["id"])
         if item["git_check"]:
@@ -702,6 +738,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "survey":
+            with db.connect(self.server.database_path) as conn:
+                self._json(HTTPStatus.OK, survey_mod.payload(conn, parts[2]))
+            return
         if path == "/api/activity":
             params = parse_qs(urlparse(self.path).query)
             project = params.get("project", [None])[0]
@@ -822,6 +862,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     result = project_registration.register(conn, body)
                     project = _row_dict(result.pop("project"))
                 self._json(HTTPStatus.CREATED, {"project": project, **result})
+                return
+            if (
+                len(parts) == 5
+                and parts[:2] == ["api", "projects"]
+                and parts[3:] == ["survey", "refresh"]
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    try:
+                        project = store.get_project(conn, parts[2])
+                    except store.NotFound as exc:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+                        return
+                    result = survey_mod.refresh(
+                        conn, project, synthesize=bool(body.get("synthesize"))
+                    )
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "survey": result["survey"],
+                        "changed": result["changed"],
+                        "previous_fingerprint": (
+                            (result["previous"] or {}).get("fingerprint")
+                        ),
+                    },
+                )
                 return
             if (
                 len(parts) == 5

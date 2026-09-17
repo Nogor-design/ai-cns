@@ -1644,3 +1644,60 @@ def test_worker_model_choice_round_trips(dashboard_server, isolated_db, monkeypa
                      body={"worker_model": {"worker": "codex", "model": "not-a-model"}},
                      headers=headers)
     assert bad.value.code == 400
+
+
+def test_project_survey_is_readable_and_refresh_needs_the_action_token(
+    dashboard_server, isolated_db, tmp_path
+):
+    repo = tmp_path / "survey-http"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "README.md").write_text(
+        "# Ledger\n\nLedger reconciles bank exports against invoices.\n",
+        encoding="utf-8",
+    )
+    (repo / "docs" / "ROADMAP.md").write_text(
+        "# Roadmap\n\nNext up:\n\n- Import the 2019 column order.\n",
+        encoding="utf-8",
+    )
+    with db.connect(isolated_db) as conn:
+        project_id = store.create_project(conn, name="Ledger", repo_path=str(repo))
+
+    # Nothing has been read yet, and reading is a plain GET.
+    status, payload = request_json(dashboard_server, f"/api/projects/{project_id}/survey")
+    assert status == 200 and payload["survey"] is None
+
+    # Refresh writes, so it is token-protected like every other mutation.
+    with pytest.raises(HTTPError) as denied:
+        request_json(
+            dashboard_server, f"/api/projects/{project_id}/survey/refresh",
+            method="POST", body={},
+        )
+    assert denied.value.code == 403
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+    status, payload = request_json(
+        dashboard_server, f"/api/projects/{project_id}/survey/refresh",
+        method="POST", body={}, headers=headers,
+    )
+    assert status == 200 and payload["changed"] is True
+    digest = payload["survey"]["digest"]
+    assert digest["does"].startswith("Ledger reconciles bank exports")
+    assert digest["plan_source"] == "docs/ROADMAP.md"
+    assert digest["next_steps"] == ["Import the 2019 column order."]
+
+    # The portfolio now carries the trimmed reading for the project card.
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    card = next(p for p in portfolio["projects"] if p["project_id"] == project_id)
+    assert card["survey"]["plan_source"] == "docs/ROADMAP.md"
+    assert card["survey"]["next_steps"] == ["Import the 2019 column order."]
+    assert {doc["path"] for doc in card["survey"]["documents"]} == {
+        "README.md", "docs/ROADMAP.md"
+    }
+
+    # Re-reading an untouched repository reports that nothing moved.
+    status, payload = request_json(
+        dashboard_server, f"/api/projects/{project_id}/survey/refresh",
+        method="POST", body={}, headers=headers,
+    )
+    assert status == 200 and payload["changed"] is False

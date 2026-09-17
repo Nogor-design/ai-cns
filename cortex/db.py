@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -388,6 +388,22 @@ CREATE TABLE IF NOT EXISTS inbox (
 );
 
 CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox(status, created_at);
+
+-- What each project's own README and plan documents say, read without an agent.
+-- Rows are snapshots: re-evaluating an unchanged project bumps ``checked_at``
+-- on the existing row instead of stacking an identical one.
+CREATE TABLE IF NOT EXISTS project_surveys (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    created_at  TEXT NOT NULL,
+    checked_at  TEXT NOT NULL,
+    source      TEXT NOT NULL,              -- local | local+ollama | agent
+    fingerprint TEXT NOT NULL,
+    digest_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_surveys
+    ON project_surveys(project_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS local_benchmarks (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
