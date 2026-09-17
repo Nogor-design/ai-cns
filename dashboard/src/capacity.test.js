@@ -17,7 +17,8 @@ test('reset labels are relative and tolerate bad input', () => {
   assert.equal(resetLabel('2026-09-20T12:00:00Z', now), 'resets in 3d')
   assert.equal(resetLabel('2026-09-17T11:00:00Z', now), 'resetting')
   assert.equal(resetLabel('nope', now), '')
-  assert.equal(resetLabel(null, now), '')
+  assert.equal(resetLabel(null, now), 'rolling window')
+  assert.equal(resetLabel(undefined, now), '')
 })
 
 test('reserve is clamped to the server range', () => {

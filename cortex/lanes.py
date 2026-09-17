@@ -237,7 +237,7 @@ IN_FLIGHT_HORIZON_HOURS = 3
 def local_runs_in_flight(conn: sqlite3.Connection) -> int:
     return conn.execute(
         """SELECT COUNT(*) FROM runs WHERE ended_at IS NULL
-           AND (model LIKE 'ollama:%' OR model LIKE 'opencode:%')
+           AND (model LIKE 'ollama:%' OR model LIKE 'opencode-local:%')
            AND started_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)""",
         (f"-{IN_FLIGHT_HORIZON_HOURS} hours",),
     ).fetchone()[0]

@@ -42,6 +42,15 @@ EXPERTS: dict[str, dict[str, Any]] = {
         "efforts": ["low", "medium", "high"],
     },
     "opencode": {
+        "role": "Low-cost implementer (OpenCode Go)",
+        "best_for": "medium code changes and reviews at very low token cost",
+        "models": [
+            "opencode-go/deepseek-v4.1-flash", "opencode-go/deepseek-v4-pro",
+            "opencode-go/glm-5.3-flash", "opencode-go/kimi-k2.7-code",
+        ],
+        "efforts": ["high", "xhigh"],
+    },
+    "opencode-local": {
         "role": "Local coding agent",
         "best_for": "private tool-using work on local models, lint and small fixes",
         "models": ["qwen3-coder:30b", "gpt-oss:20b", "devstral-small-2:latest"],

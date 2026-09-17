@@ -20,7 +20,8 @@ DEFAULT_MODELS: dict[str, str] = {
     "gemini": "default",
     "agy": "default",
     "grok": "default",
-    "opencode": "qwen3-coder:30b",
+    "opencode": "opencode-go/deepseek-v4.1-flash",
+    "opencode-local": "qwen3-coder:30b",
     "ollama": "phi4:14b",
     "perplexity": "search",
 }
@@ -233,17 +234,21 @@ def _route_by_task(project: sqlite3.Row, task: sqlite3.Row) -> Route:
                 requires_approval=False,
                 reasons=tuple(reasons + ["bounded code draft can start locally"]),
             )
+        # Owner direction 2026-09-17: DeepSeek V4.1 Flash on OpenCode Go is
+        # capable and very cheap, so it takes medium implementation work.
         return Route(
             risk=risk,
             complexity=score,
-            worker="gemini",
-            model=requested_model or "default",
+            worker="opencode",
+            model=requested_model or "opencode-go/deepseek-v4.1-flash",
             action="implement",
             budget=budget,
             effort=effort,
             reviewer="codex",
             requires_approval=False,
-            reasons=tuple(reasons + ["medium implementation with Codex acceptance"]),
+            reasons=tuple(reasons + [
+                "medium implementation on low-cost OpenCode Go with Codex acceptance"
+            ]),
         )
 
     if task["type"] in {"review", "planning"} and score >= 3:

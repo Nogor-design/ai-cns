@@ -120,6 +120,20 @@ def probe(worker: str, *, max_age: float = 300) -> dict[str, str | None]:
             }
         except (OSError, subprocess.TimeoutExpired) as exc:
             result = {"availability": "unavailable", "note": str(exc)}
+    elif worker == "opencode":
+        # Credential names only; opencode never prints the keys themselves.
+        try:
+            proc = subprocess.run(
+                [_executable("opencode"), "auth", "list"], capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=10,
+            )
+            signed_in = "opencode go" in f"{proc.stdout}\n{proc.stderr}".lower()
+            result = {
+                "availability": "ready" if signed_in else "needs_auth",
+                "note": None if signed_in else "Run `opencode auth login` and add the OpenCode Go key",
+            }
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            result = {"availability": "unavailable", "note": str(exc)}
     else:
         result = {"availability": "ready", "note": None}
     _PROBE_CACHE[worker] = (time.monotonic(), result)
@@ -213,16 +227,28 @@ def build_command(
         return CommandSpec(worker, tuple(argv), False)
 
     if worker == "opencode":
+        # OpenCode Go subscription models, using the owner's own opencode login.
+        # Only the opencode-go provider is accepted: other opencode providers
+        # (for example Zen) bill per use.
+        argv = [
+            *_opencode_run_prefix(),
+            "--model", opencode_go_model(model),
+            "--agent", "build" if write else "plan",
+            "--dir", workspace, "--file", brief_path,
+        ]
+        variant = {"high": "high", "xhigh": "max"}.get(str(effort or ""))
+        if variant:
+            argv.extend(["--variant", variant])
+        return CommandSpec(worker, tuple(argv), False)
+
+    if worker == "opencode-local":
         # Local-only by construction: the model must be an installed Ollama
         # model, and the provider config is Cortex-owned so the owner's own
         # opencode settings are never edited.
         local_model = opencode_model(model)
         config_path = write_opencode_config(local_model)
-        # The message goes first: --file takes a list and would swallow it.
         argv = [
-            _executable("opencode"), "run",
-            "Follow the complete task brief in the attached file.",
-            "--format", "json",
+            *_opencode_run_prefix(),
             "--model", f"ollama/{local_model}",
             "--agent", "build" if write else "plan",
             "--dir", workspace, "--file", brief_path,
@@ -414,7 +440,11 @@ def humanize(worker: str, line: str) -> str | None:
             return f"\n[{result.get('status') or 'error'}] {result['error']}\n"
         return None
 
-    if worker == "opencode":
+    if worker.startswith("opencode"):
+        if event.get("type") == "error":
+            error = event.get("error")
+            detail = error.get("data", error) if isinstance(error, dict) else error
+            return f"\n[error] {str(detail)[:400]}\n"
         part = event.get("part")
         if isinstance(part, dict):
             if part.get("type") == "text" and part.get("text"):
@@ -558,13 +588,29 @@ def _extract_usage(output: str) -> dict[str, object] | None:
         and data["part"].get("type") == "step-finish"
         and isinstance(data["part"].get("tokens"), dict)
     ]
-    if finishes:  # opencode reports tokens per step
-        totals = {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
-        for tokens in finishes:
-            totals["input_tokens"] += int(tokens.get("input") or 0)
-            totals["output_tokens"] += int(tokens.get("output") or 0)
-            totals["reasoning_tokens"] += int(tokens.get("reasoning") or 0)
-        return dict(totals)
+    if finishes:  # opencode reports tokens (and, for paid providers, cost) per step
+        totals: dict[str, object] = {
+            "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
+            "cached_tokens": 0,
+        }
+        cost = 0.0
+        for data in objects:
+            part = data.get("part")
+            if not (isinstance(part, dict) and part.get("type") == "step-finish"):
+                continue
+            tokens = part.get("tokens")
+            if not isinstance(tokens, dict):
+                continue
+            cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+            totals["input_tokens"] = int(totals["input_tokens"]) + int(tokens.get("input") or 0)
+            totals["output_tokens"] = int(totals["output_tokens"]) + int(tokens.get("output") or 0)
+            totals["reasoning_tokens"] = int(totals["reasoning_tokens"]) + int(tokens.get("reasoning") or 0)
+            totals["cached_tokens"] = int(totals["cached_tokens"]) + int(cache.get("read") or 0)
+            if isinstance(part.get("cost"), (int, float)):
+                cost += float(part["cost"])
+        if cost:
+            totals["cost_usd"] = round(cost, 6)
+        return totals
     for data in reversed(objects):
         nested = data.get("result")
         if isinstance(nested, dict) and isinstance(nested.get("usage"), dict):
@@ -592,6 +638,32 @@ def _max_turns(budget: str) -> str:
 
 
 DEFAULT_OPENCODE_MODEL = "qwen3-coder:30b"
+DEFAULT_OPENCODE_GO_MODEL = "opencode-go/deepseek-v4.1-flash"
+OPENCODE_GO_PROVIDER = "opencode-go"
+
+
+def _opencode_run_prefix() -> list[str]:
+    # The message goes first: --file takes a list and would swallow it.
+    # --pure skips the owner's external plugins, keeping unattended runs lean.
+    return [
+        _executable("opencode"), "run",
+        "Follow the complete task brief in the attached file.",
+        "--format", "json", "--pure",
+    ]
+
+
+def opencode_go_model(model: str | None) -> str:
+    """Normalise an OpenCode Go model id, refusing any other provider."""
+    value = str(model or "").strip()
+    if not value or value == "default":
+        return DEFAULT_OPENCODE_GO_MODEL
+    if "/" not in value:
+        return f"{OPENCODE_GO_PROVIDER}/{value}"
+    if value.split("/", 1)[0] != OPENCODE_GO_PROVIDER:
+        raise WorkerError(
+            f"the opencode worker only uses OpenCode Go models; got {value!r}"
+        )
+    return value
 
 
 def opencode_model(model: str | None) -> str:
@@ -639,7 +711,7 @@ def write_opencode_config(model: str) -> Path:
 
 
 def _executable(worker: str) -> str:
-    if worker == "opencode" and os.name == "nt":
+    if worker.startswith("opencode") and os.name == "nt":
         # npm installs a PowerShell/cmd shim; run the real binary instead so
         # no script host reinterprets the arguments.
         shim = shutil.which("opencode")
@@ -647,4 +719,6 @@ def _executable(worker: str) -> str:
             real = Path(shim).parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
             if real.exists():
                 return str(real)
+    if worker.startswith("opencode"):
+        return "opencode"
     return worker

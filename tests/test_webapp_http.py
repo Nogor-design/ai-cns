@@ -1534,7 +1534,7 @@ def test_capacity_settings_require_token_and_protect_projects(
     from cortex import autonomy, capacity, lanes
 
     monkeypatch.setattr(lanes, "payload", lambda conn: {"models": [], "loaded": []})
-    monkeypatch.setattr(capacity, "refresh", lambda conn, probe_stale=False: 0)
+    monkeypatch.setattr(capacity, "refresh", lambda conn, probe_stale=False, force=True: 0)
     repo = tmp_path / "apollo-http"
     repo.mkdir()
     with db.connect(isolated_db) as conn:

@@ -10,7 +10,7 @@ export const LANE_LABELS = {
 }
 
 export function windowLabel(name) {
-  return { five_hour: '5-hour', seven_day: 'Weekly', refusal: 'Cooldown' }[name] || String(name || '').replaceAll('_', ' ')
+  return { five_hour: '5-hour', seven_day: 'Weekly', thirty_day: 'Monthly', refusal: 'Cooldown' }[name] || String(name || '').replaceAll('_', ' ')
 }
 
 // Colour a quota bar by how close it is to the background ceiling.
@@ -23,6 +23,7 @@ export function windowTone(usedPercent, ceilingPercent) {
 }
 
 export function resetLabel(iso, now = Date.now()) {
+  if (iso === null) return 'rolling window'
   if (!iso) return ''
   const when = new Date(iso).getTime()
   if (Number.isNaN(when)) return ''

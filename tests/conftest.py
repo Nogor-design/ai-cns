@@ -15,6 +15,9 @@ def isolated_db(tmp_path, monkeypatch):
     """Point CORTEX_DB at a temp file so no test touches the real database."""
     dbfile = tmp_path / "cortex.db"
     monkeypatch.setenv("CORTEX_DB", str(dbfile))
+    # Never read the owner's real provider usage logs from tests.
+    monkeypatch.setenv("CORTEX_OPENCODE_DB", str(tmp_path / "no-opencode.db"))
+    monkeypatch.setenv("CORTEX_CODEX_SESSIONS", str(tmp_path / "no-codex-sessions"))
     return dbfile
 
 

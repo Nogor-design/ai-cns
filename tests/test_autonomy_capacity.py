@@ -230,6 +230,12 @@ def test_model_classification():
 
 def test_local_admission_respects_slot_and_ninjatrader(conn, project, monkeypatch):
     lanes_by_model = {"small": "gpu", "coder": "hybrid_moe", "huge": "cpu_batch"}
+    # A cloud OpenCode Go run must not occupy the local slot.
+    task_id = store.create_task(conn, project_id=project["id"], title="Go")
+    store.create_run(
+        conn, task_id=task_id, project_id=project["id"],
+        model="opencode:opencode-go/deepseek-v4.1-flash", execution_mode="headless_cli",
+    )
     monkeypatch.setattr(lanes, "lane_for", lambda model: lanes_by_model.get(model))
     monkeypatch.setattr(lanes, "ninjatrader_running", lambda max_age=15: True)
     assert lanes.admit(conn, "small")[0]
@@ -269,9 +275,9 @@ def test_agy_command_points_at_brief_and_stays_read_only(tmp_path):
     assert write.argv[write.argv.index("--mode") + 1] == "accept-edits"
 
 
-def test_opencode_is_local_only(tmp_path):
+def test_opencode_local_is_local_only(tmp_path):
     spec = workers.build_command(
-        worker="opencode", model="default", action="review", workspace=tmp_path,
+        worker="opencode-local", model="default", action="review", workspace=tmp_path,
         brief_path=tmp_path / "brief.md", budget="small",
     )
     argv = list(spec.argv)
@@ -288,7 +294,66 @@ def test_opencode_is_local_only(tmp_path):
     assert workers.opencode_model("trading-hub/phi4:14b") == "trading-hub/phi4:14b"
     with pytest.raises(workers.WorkerError, match="local Ollama"):
         workers.opencode_model("anthropic/claude-sonnet")
-    assert "opencode" in policy.LOCAL_WORKERS
+    assert "opencode-local" in policy.LOCAL_WORKERS
+    assert "opencode" not in policy.LOCAL_WORKERS
+
+
+def test_opencode_go_uses_only_the_go_provider(tmp_path):
+    spec = workers.build_command(
+        worker="opencode", model="default", action="implement", workspace=tmp_path,
+        brief_path=tmp_path / "brief.md", budget="medium", effort="xhigh",
+    )
+    argv = list(spec.argv)
+    assert argv[argv.index("--model") + 1] == "opencode-go/deepseek-v4.1-flash"
+    assert argv[argv.index("--agent") + 1] == "build"
+    assert argv[argv.index("--variant") + 1] == "max"
+    assert "--pure" in argv and spec.env == ()
+    assert argv[2].startswith("Follow the complete task brief")
+    assert workers.opencode_go_model("glm-5.3-flash") == "opencode-go/glm-5.3-flash"
+    with pytest.raises(workers.WorkerError, match="OpenCode Go"):
+        workers.opencode_go_model("opencode/claude-opus-5")   # Zen bills per use
+    with pytest.raises(workers.WorkerError, match="OpenCode Go"):
+        workers.opencode_go_model("ollama/qwen3-coder:30b")
+
+
+def test_opencode_go_spend_windows(conn, tmp_path, monkeypatch):
+    import sqlite3 as sq
+
+    path = tmp_path / "opencode.db"
+    source = sq.connect(path)
+    source.execute(
+        "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER,"
+        " time_updated INTEGER, data TEXT)"
+    )
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    rows = [
+        (now_ms - 60_000, "opencode-go", 3.0),            # last 5 hours
+        (now_ms - 3 * 86_400_000, "opencode-go", 12.0),   # this week
+        (now_ms - 20 * 86_400_000, "opencode-go", 20.0),  # this month
+        (now_ms - 60_000, "opencode", 50.0),              # Zen: not Go quota
+    ]
+    for index, (created, provider, cost) in enumerate(rows):
+        source.execute(
+            "INSERT INTO message VALUES (?,?,?,?,?)",
+            (str(index), "s", created, created,
+             json.dumps({"role": "assistant", "providerID": provider, "cost": cost})),
+        )
+    source.commit()
+    source.close()
+    monkeypatch.setenv(capacity.OPENCODE_DB_ENV, str(path))
+
+    readings = {r.window: r for r in capacity.opencode_go_readings(conn)}
+    assert readings["five_hour"].used_percent == 25.0      # $3 of $12
+    assert readings["seven_day"].used_percent == 50.0      # $15 of $30
+    assert readings["thirty_day"].used_percent == 58.33    # $35 of $60
+    assert readings["seven_day"].source_ref == "$15.00 of $30.00"
+    capacity.refresh(conn)
+    assert capacity.admit(conn, "opencode").allowed        # 58.33 + 2 <= 70
+
+    capacity.set_go_monthly_usd(conn, 30)                   # week limit $15 -> 100%
+    capacity.refresh(conn)
+    held = capacity.admit(conn, "opencode")
+    assert not held.allowed and "seven day" in held.reason
 
 
 def test_agy_and_opencode_output_parsing():
@@ -305,14 +370,16 @@ def test_agy_and_opencode_output_parsing():
     opencode = "\n".join(json.dumps(event) for event in [
         {"type": "step_start", "part": {"type": "step-start"}},
         {"type": "text", "part": {"type": "text", "text": "done"}},
-        {"type": "step_finish", "part": {"type": "step-finish",
-                                         "tokens": {"input": 100, "output": 5, "reasoning": 1}}},
+        {"type": "step_finish", "part": {"type": "step-finish", "cost": 0.0001,
+                                         "tokens": {"input": 100, "output": 5, "reasoning": 1,
+                                                    "cache": {"read": 900}}}},
         {"type": "step_finish", "part": {"type": "step-finish",
                                          "tokens": {"input": 50, "output": 5, "reasoning": 0}}},
     ])
     assert workers.extract_text(opencode) == "done"
     assert workers._extract_usage(opencode) == {
         "input_tokens": 150, "output_tokens": 10, "reasoning_tokens": 1,
+        "cached_tokens": 900, "cost_usd": 0.0001,
     }
 
 
@@ -383,3 +450,16 @@ def test_scheduler_run_is_attributed_and_records_quota(conn, project, monkeypatc
     assert {w["window"] for w in capacity.current_windows(conn, "claude")} == {
         "five_hour", "seven_day"
     }
+
+
+def test_medium_code_routes_to_opencode_go(conn, project):
+    from cortex import routing
+
+    task = store.get_task(conn, store.create_task(
+        conn, project_id=project["id"], title="Add input validation to the form",
+        type="code", complexity=5, acceptance="tests pass",
+    ))
+    route = routing.effective_route(project, task)
+    assert route.worker == "opencode"
+    assert route.model == "opencode-go/deepseek-v4.1-flash"
+    assert route.action == "implement" and route.reviewer == "codex"

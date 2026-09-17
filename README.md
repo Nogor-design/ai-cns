@@ -65,8 +65,11 @@ keep working without the owner. Phase 1 adds:
   readings from run output or a tiny probe; other CLIs are capped by run count.
 - **Local lanes**: one local model at a time, models classified by real size and
   architecture, and only GPU-sized models while NinjaTrader is running.
-- **New workers**: `agy` (Antigravity) and `opencode` (local Ollama models only).
-- `cortex capacity show|refresh [--probe]|reserve|pause|resume|autonomy|bench`.
+- **New workers**: `agy` (Antigravity), `opencode` (your OpenCode Go
+  subscription, default DeepSeek V4.1 Flash; takes medium code work) and
+  `opencode-local` (local Ollama models only). OpenCode Go quota is tracked as
+  dollar spend against the monthly limit you set (`cortex capacity go-limit`).
+- `cortex capacity show|refresh [--probe]|reserve|go-limit|pause|resume|autonomy|bench`.
 
 
 ## Which worker may see which repository

@@ -21,7 +21,8 @@ import CapacityPanel from './CapacityPanel.jsx'
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
   gemini: { label: 'Gemini', tone: 'blue' }, agy: { label: 'Antigravity', tone: 'blue' },
-  grok: { label: 'Grok', tone: 'ink' }, opencode: { label: 'opencode', tone: 'violet' },
+  grok: { label: 'Grok', tone: 'ink' }, opencode: { label: 'OpenCode Go', tone: 'emerald' },
+  'opencode-local': { label: 'opencode (local)', tone: 'violet' },
   ollama: { label: 'Ollama', tone: 'violet' }, perplexity: { label: 'Perplexity', tone: 'cyan' },
   owner: { label: 'Owner', tone: 'slate' }, deterministic: { label: 'No-token plan', tone: 'slate' },
 }

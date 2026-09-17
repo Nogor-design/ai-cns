@@ -732,6 +732,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/capacity":
             with db.connect(self.server.database_path) as conn:
+                capacity.refresh(conn, force=False)
                 self._json(HTTPStatus.OK, capacity_payload(conn))
             return
         if path == "/api/jobs":
@@ -1054,6 +1055,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         capacity.set_reserve_pct(conn, float(body["reserve_pct"]))
                     if "paused" in body:
                         autonomy.set_paused(conn, bool(body["paused"]))
+                    if "opencode_go_monthly_usd" in body:
+                        capacity.set_go_monthly_usd(conn, float(body["opencode_go_monthly_usd"]))
+                        capacity.refresh(conn, force=False)
                     self._json(HTTPStatus.OK, capacity_payload(conn))
                 return
             if path == "/api/capacity/refresh":

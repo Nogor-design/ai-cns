@@ -205,7 +205,27 @@ database, dashboard alert thresholds.
   Remaining Phase 1 exit item: owner review, then merge so the live dashboard
   uses schema v14.
 
+- 2026-09-17: Owner authorised merging all pending Cortex work. The abandoned
+  blueprint-review fix was committed (9402c5b), Phase 1 merged (3fe47be), and
+  `master` fast-forwarded; 252 Python and 27 dashboard tests passed.
+- 2026-09-17: OpenCode Go added (owner direction). `opencode` now means the
+  owner's OpenCode Go subscription (default `opencode-go/deepseek-v4.1-flash`);
+  the local Ollama variant is `opencode-local`. Medium code implementation routes
+  to OpenCode Go instead of Gemini. Go quota is dollar-based: spend from
+  opencode's local database over rolling 5-hour/7-day/30-day windows against an
+  owner-set monthly limit (default $60, the DeepSeek V4.1 Flash cap; 5 hours =
+  20%, week = 50%). An unattended end-to-end review cost $0.0033 (19.5k input,
+  38.5k cached, 293 output tokens) and changed no files.
+
 ## 8. Phase 1 findings and follow-ups
+
+- OpenCode Go spend is read only from this machine's opencode database, and its
+  windows are rolling approximations of Go's own. The OpenCode console
+  (opencode.ai/auth) is authoritative; if other machines use the same key,
+  lower the monthly limit in the dashboard to compensate.
+- Cortex only accepts `opencode-go/*` models for the `opencode` worker; other
+  opencode providers such as Zen bill per use and are refused.
+
 
 - Codex's weekly window was 79% used, above the default 70% background ceiling,
   so Codex is held from unattended work until it resets (2026-09-19 16:05 UTC).

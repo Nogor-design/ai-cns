@@ -9,6 +9,11 @@ provider signals wherever they exist:
   time) into its session logs and JSON event stream.
 * Claude emits ``rate_limit_event`` with five-hour and seven-day utilization in
   ``--output-format stream-json`` output.
+* OpenCode Go limits are dollar amounts (5 hours = 20%, week = 50% of the
+  monthly limit). opencode records the cost of every message in its local
+  database, so spend over rolling windows is compared to the owner-set monthly
+  limit. This sees only this machine's usage; the OpenCode console is the
+  authority.
 
 Providers without such a signal (Grok, Gemini, Antigravity) are limited by a
 count of unattended runs per rolling five hours. Local workers are governed by
@@ -32,9 +37,9 @@ from typing import Any, Iterable
 
 from . import ids, settings
 
-METERED: tuple[str, ...] = ("codex", "claude")
+METERED: tuple[str, ...] = ("codex", "claude", "opencode")
 COUNTED: tuple[str, ...] = ("grok", "gemini", "agy")
-LOCAL: tuple[str, ...] = ("ollama", "opencode")
+LOCAL: tuple[str, ...] = ("ollama", "opencode-local")
 
 RESERVE_KEY = "capacity.reserve_pct"
 DEFAULT_RESERVE_PCT = 30.0
@@ -43,6 +48,15 @@ DEFAULT_RUN_COST_PCT = 2.0
 CALL_CAP_KEY = "capacity.counted_runs_per_5h"
 DEFAULT_CALL_CAP = 10
 COOLDOWN_FALLBACK = timedelta(minutes=30)
+
+GO_MONTHLY_KEY = "capacity.opencode_go_monthly_usd"
+DEFAULT_GO_MONTHLY_USD = 60.0
+GO_WINDOWS: tuple[tuple[str, int, float], ...] = (
+    ("five_hour", 300, 0.2), ("seven_day", 10080, 0.5), ("thirty_day", 43200, 1.0),
+)
+OPENCODE_DB_ENV = "CORTEX_OPENCODE_DB"
+CODEX_SCAN_INTERVAL = 60.0
+_last_codex_scan = 0.0
 
 CODEX_SESSIONS_ENV = "CORTEX_CODEX_SESSIONS"
 _TAIL_BYTES = 512_000
@@ -97,6 +111,18 @@ def expected_run_pct(conn: sqlite3.Connection) -> float:
 
 def counted_cap(conn: sqlite3.Connection) -> int:
     return int(_clamp(settings.get_float(conn, CALL_CAP_KEY, DEFAULT_CALL_CAP), 0, 500))
+
+
+def go_monthly_usd(conn: sqlite3.Connection) -> float:
+    return _clamp(settings.get_float(conn, GO_MONTHLY_KEY, DEFAULT_GO_MONTHLY_USD), 1, 10_000)
+
+
+def set_go_monthly_usd(conn: sqlite3.Connection, value: float) -> float:
+    amount = float(value)
+    if not 1 <= amount <= 10_000:
+        raise ValueError("OpenCode Go monthly limit must be between $1 and $10,000")
+    settings.set_value(conn, GO_MONTHLY_KEY, f"{amount:g}")
+    return amount
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -389,13 +415,68 @@ CLAUDE_PROBE_ARGV: tuple[str, ...] = (
 )
 
 
-def refresh(conn: sqlite3.Connection, *, probe_stale: bool = False) -> int:
+# ------------------------------------------------------- opencode go ---
+def opencode_db_path() -> Path:
+    override = os.environ.get(OPENCODE_DB_ENV)
+    if override:
+        return Path(override)
+    return Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+
+
+def opencode_go_readings(conn: sqlite3.Connection) -> list[Reading]:
+    """Rolling OpenCode Go spend as a share of each dollar limit.
+
+    Opens opencode's database read-only and reads only message cost fields.
+    """
+    path = opencode_db_path()
+    if not path.is_file():
+        return []
+    monthly = go_monthly_usd(conn)
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    try:
+        source = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return []
+    readings = []
+    try:
+        for window, minutes, share in GO_WINDOWS:
+            spent = source.execute(
+                """SELECT COALESCE(SUM(json_extract(data, '$.cost')), 0) FROM message
+                   WHERE time_created >= ?
+                     AND json_extract(data, '$.providerID') = 'opencode-go'""",
+                (now_ms - minutes * 60_000,),
+            ).fetchone()[0]
+            limit = monthly * share
+            readings.append(Reading(
+                provider="opencode", window=window, window_minutes=minutes,
+                used_percent=round(float(spent) / limit * 100, 2),
+                resets_at=None, source="opencode-db",
+                source_ref=f"${float(spent):.2f} of ${limit:.2f}",
+            ))
+    except sqlite3.Error:
+        return []
+    finally:
+        source.close()
+    return readings
+
+
+def refresh(
+    conn: sqlite3.Connection, *, probe_stale: bool = False, force: bool = True,
+) -> int:
     """Pull local quota signals; optionally probe Claude when its reading is stale.
 
-    Reading Codex session logs is free. A Claude probe is one tiny Haiku turn
-    (a few thousand tokens), so it runs at most once per ``CLAUDE_PROBE_MIN_AGE``.
+    Reading Codex session logs and the opencode database is free; ``force=False``
+    lets frequent dashboard polls skip the Codex log scan for a minute. A Claude
+    probe is one tiny Haiku turn (a few thousand tokens), so it runs at most once
+    per ``CLAUDE_PROBE_MIN_AGE``.
     """
-    stored = record(conn, scan_codex_sessions())
+    import time
+
+    global _last_codex_scan
+    stored = record(conn, opencode_go_readings(conn))
+    if force or time.monotonic() - _last_codex_scan >= CODEX_SCAN_INTERVAL:
+        _last_codex_scan = time.monotonic()
+        stored += record(conn, scan_codex_sessions())
     if probe_stale and claude_reading_age(conn) > CLAUDE_PROBE_MIN_AGE:
         stored += probe_claude(conn)
     return stored
@@ -460,6 +541,7 @@ def current_windows(
             "resets_at": None if expired else row["resets_at"],
             "limited": bool(row["limited"]) and not expired,
             "source": row["source"],
+            "detail": row["source_ref"] if row["source"] == "opencode-db" else None,
             "observed_at": row["observed_at"],
         })
     return windows
@@ -567,5 +649,6 @@ def payload(conn: sqlite3.Connection, providers: Iterable[str]) -> dict[str, Any
         "reserve_pct": reserve_pct(conn),
         "expected_run_pct": expected_run_pct(conn),
         "counted_runs_per_5h": counted_cap(conn),
+        "opencode_go_monthly_usd": go_monthly_usd(conn),
         "providers": rows,
     }

@@ -27,13 +27,14 @@ from typing import Any, Iterable
 
 # Every worker Cortex knows how to drive.
 ALL_WORKERS: tuple[str, ...] = (
-    "codex", "claude", "gemini", "agy", "grok", "opencode", "ollama", "perplexity",
+    "codex", "claude", "gemini", "agy", "grok", "opencode", "opencode-local",
+    "ollama", "perplexity",
 )
 
 # Workers that never send repository content off this machine.
-# opencode is included because Cortex only ever runs it against local Ollama
-# models (see workers.opencode_model).
-LOCAL_WORKERS: frozenset[str] = frozenset({"ollama", "opencode"})
+# opencode-local only ever runs against local Ollama models (see
+# workers.opencode_model). Plain "opencode" is OpenCode Go, a cloud service.
+LOCAL_WORKERS: frozenset[str] = frozenset({"ollama", "opencode-local"})
 
 # Applied only when a project has no explicit allowlist yet. Restricted repos
 # stay local until their owner opts in, so an unconfigured project can never
@@ -47,7 +48,7 @@ DEFAULT_BY_PRIVACY: dict[str, tuple[str, ...]] = {
 # Order used when the router's first choice is not permitted. Earlier entries
 # are preferred. See choose_worker() for how this is applied.
 PREFERENCE_ORDER: tuple[str, ...] = (
-    "codex", "claude", "gemini", "agy", "grok", "opencode", "ollama",
+    "codex", "claude", "opencode", "gemini", "agy", "grok", "opencode-local", "ollama",
 )
 
 

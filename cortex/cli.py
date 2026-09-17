@@ -1605,8 +1605,10 @@ def _print_quota(conn: sqlite3.Connection) -> None:
         for window in row["windows"]:
             used = "?" if window["used_percent"] is None else f"{window['used_percent']:g}%"
             typer.echo(
-                f"       {window['window']:<10} {used:>7}  resets {window['resets_at'] or '-'}"
-                f"  ({window['source']}{', estimated' if window['estimated'] else ''})"
+                f"       {window['window']:<10} {used:>7}  "
+                + (f"resets {window['resets_at']}" if window["resets_at"] else "rolling")
+                + (f"  {window['detail']}" if window.get("detail") else "")
+                + f"  ({window['source']}{', estimated' if window['estimated'] else ''})"
             )
 
 
@@ -1656,6 +1658,21 @@ def capacity_reserve(
     except ValueError as exc:
         _err(str(exc))
         raise typer.Exit(2)
+    _print_quota(conn)
+
+
+@capacity_app.command("go-limit")
+def capacity_go_limit(
+    dollars: float = typer.Argument(..., help="OpenCode Go monthly dollar limit for your model."),
+):
+    """Set the OpenCode Go monthly limit (5 hours = 20%, week = 50% of it)."""
+    conn = _conn()
+    try:
+        capacity.set_go_monthly_usd(conn, dollars)
+    except ValueError as exc:
+        _err(str(exc))
+        raise typer.Exit(2)
+    capacity.refresh(conn)
     _print_quota(conn)
 
 

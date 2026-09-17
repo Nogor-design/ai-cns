@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Cpu, LoaderCircle, PauseCircle, CirclePlay, RefreshCw, ShieldCheck } from 'lucide-react'
 import { LANE_LABELS, clampReserve, resetLabel, sortModels, windowLabel, windowTone } from './capacity.js'
 
-const PROVIDER_LABELS = { codex: 'Codex', claude: 'Claude', grok: 'Grok', gemini: 'Gemini', agy: 'Antigravity' }
+const PROVIDER_LABELS = { codex: 'Codex', claude: 'Claude', opencode: 'OpenCode Go', grok: 'Grok', gemini: 'Gemini', agy: 'Antigravity' }
 const MODE_LABELS = { off: 'Off', read_only: 'Read-only', integration: 'Integration' }
 
 async function call(path, { token, body, method = 'GET' } = {}) {
@@ -34,7 +34,7 @@ function QuotaRow({ row, reserve }) {
           <b style={{ left: `${100 - reserve}%` }} title={`Your ${reserve}% reserve starts here`} />
         </div>
         <em>{used == null ? '?' : `${Math.round(used)}%`}</em>
-        <small>{window.estimated ? 'reset since last reading' : resetLabel(window.resets_at)}</small>
+        <small>{window.estimated ? 'reset since last reading' : [window.detail, resetLabel(window.resets_at)].filter(Boolean).join(' · ')}</small>
       </div>
     }) : <p className="quota-note">{row.kind === 'counted' ? 'No usage signal from this CLI; limited by run count.' : 'No reading yet.'}</p>}
     <p className="quota-reason">{row.reason}</p>
@@ -113,6 +113,14 @@ export default function CapacityPanel({ token, onError }) {
             aria-label="Quota reserve percent" />
         </label>
         {quota.providers.map(row => <QuotaRow key={row.provider} row={row} reserve={quota.reserve_pct} />)}
+        <label className="go-limit">
+          <span>OpenCode Go monthly limit ($)</span>
+          <input type="number" min="1" max="10000" step="1" defaultValue={quota.opencode_go_monthly_usd}
+            key={quota.opencode_go_monthly_usd}
+            onBlur={event => { const value = Number(event.currentTarget.value); if (value && value !== quota.opencode_go_monthly_usd) save({ opencode_go_monthly_usd: value }, 'go') }}
+            aria-label="OpenCode Go monthly dollar limit" />
+          <small>From your OpenCode console; 5 hours = 20%, week = 50%.</small>
+        </label>
       </article>
       <article className="capacity-local">
         <span className="health-label">Local compute</span>
