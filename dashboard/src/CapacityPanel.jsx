@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Check, Cpu, Inbox, LoaderCircle, PauseCircle, CirclePlay, RefreshCw, ShieldCheck, X } from 'lucide-react'
-import { INBOX_KIND_LABELS, LANE_LABELS, clampReserve, resetLabel, schedulerState, sortModels, windowLabel, windowTone } from './capacity.js'
+import { INBOX_KIND_LABELS, LANE_LABELS, clampReserve, resetLabel, schedulerState, sortModels, stopSummary, windowLabel, windowTone } from './capacity.js'
 
 const PROVIDER_LABELS = { codex: 'Codex', claude: 'Claude', opencode: 'OpenCode Go', grok: 'Grok', gemini: 'Gemini', agy: 'Antigravity' }
 const MODE_LABELS = { off: 'Off', read_only: 'Read-only', integration: 'Integration' }
@@ -62,6 +62,13 @@ function AutopilotStrip({ pilot, busy, onSave, onInbox }) {
       {holds.map(([worker, reason]) => <p className="pilot-hold" key={worker} title={reason}>
         {worker} on hold <button type="button" onClick={() => onSave({ release_hold: worker }, 'hold')} disabled={Boolean(busy)}>Release</button>
       </p>)}
+      {(pilot.recent_stops || []).length > 0 && <div className="pilot-stops">
+        <small>Stopped runs · why</small>
+        {pilot.recent_stops.map(stop => <p key={stop.id}>
+          <b>{stop.worker || 'worker'}</b> {stop.title || 'task'}
+          <em>{stopSummary(stop)}</em>
+        </p>)}
+      </div>}
     </article>
     <article className="autopilot-inbox">
       <span className="health-label"><Inbox size={12} /> Needs you · {box.open} open{box.queued ? ` · ${box.queued} queued` : ''}</span>

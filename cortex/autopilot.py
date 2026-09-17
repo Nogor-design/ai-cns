@@ -227,7 +227,17 @@ class Autopilot:
             run_id = exc.run_id or run_id
             jobs.finish(conn, job_id, status="failed", error=str(exc), run_id=run_id)
             if run_id:
-                self._file_failure(conn, store.get_task(conn, task_id), worker, run_id, str(exc))
+                task = store.get_task(conn, task_id)
+                evidence = watch.snapshot() if watch.stopped_reason else None
+                if evidence:
+                    store.create_activity_event(
+                        conn, project_id=task["project_id"], task_id=task_id,
+                        actor_type="system", actor_name="cortex-scheduler",
+                        action="run.supervisor_stopped",
+                        summary=f"Supervisor stopped {worker}: {watch.stopped_reason}"[:500],
+                        source="cortex-scheduler", source_ref=run_id, evidence=evidence,
+                    )
+                self._file_failure(conn, task, worker, run_id, str(exc))
             else:
                 # Refused before a run existed (quota moved, guard fired): the
                 # task stays assigned and will be reconsidered next tick.
@@ -329,6 +339,7 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
            WHERE actor_name = 'cortex-scheduler'
            ORDER BY occurred_at DESC LIMIT 15""",
     ).fetchall()
+    stops = recent_stops(conn)
     holds = {
         worker: reason
         for worker in (*capacity.METERED, *capacity.COUNTED, *capacity.LOCAL)
@@ -343,8 +354,40 @@ def status(conn: sqlite3.Connection) -> dict[str, Any]:
         "in_flight": [{key: row[key] for key in row.keys()} for row in running],
         "recent": [{key: row[key] for key in row.keys()} for row in recent],
         "holds": holds,
+        "recent_stops": stops,
         "inbox": inbox.payload(conn),
     }
+
+
+def recent_stops(conn: sqlite3.Connection, limit: int = 8) -> list[dict[str, Any]]:
+    """Unattended runs that did not finish cleanly, newest first.
+
+    This is the evidence for tuning ``supervisor.WORKER_LIMITS``: it pairs each
+    stop with what the supervisor had counted when it intervened.
+    """
+    rows = conn.execute(
+        """SELECT r.id, r.model, r.started_at, r.ended_at, r.exit_code, r.human_note,
+                  t.title, p.name AS project_name, e.evidence_json
+           FROM runs r
+           LEFT JOIN tasks t ON t.id = r.task_id
+           LEFT JOIN projects p ON p.id = r.project_id
+           LEFT JOIN activity_events e
+                  ON e.source_ref = r.id AND e.action = 'run.supervisor_stopped'
+           WHERE r.started_by = 'scheduler' AND r.ended_at IS NOT NULL
+             AND (r.exit_code IS NULL OR r.exit_code != 0)
+           ORDER BY r.ended_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    stops = []
+    for row in rows:
+        item = {key: row[key] for key in row.keys() if key != "evidence_json"}
+        item["worker"] = str(row["model"] or "").split(":", 1)[0] or None
+        try:
+            item["supervisor"] = json.loads(row["evidence_json"]) if row["evidence_json"] else None
+        except json.JSONDecodeError:
+            item["supervisor"] = None
+        stops.append(item)
+    return stops
 
 
 def dumps(report: TickReport) -> str:

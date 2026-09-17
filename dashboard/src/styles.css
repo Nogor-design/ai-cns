@@ -1002,3 +1002,9 @@ footer span:last-child { margin-left: auto; }
   .autopilot-strip { grid-template-columns: 1fr; }
   .autopilot-state { border-right: 0; border-bottom: 1px solid var(--line); }
 }
+
+.pilot-stops { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 9px; }
+.pilot-stops > small { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; color: #8a969c; }
+.pilot-stops p { margin-top: 6px; font-size: 10px; color: #4d5c63; line-height: 1.45; }
+.pilot-stops b { color: #2c3c44; text-transform: capitalize; }
+.pilot-stops em { display: block; font-style: normal; color: #a1452f; overflow-wrap: anywhere; }

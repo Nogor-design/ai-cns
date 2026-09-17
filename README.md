@@ -79,6 +79,8 @@ Phase 2 adds the scheduler itself:
 - A **supervisor** stops runs that go silent, exceed their tool-call budget
   (Antigravity: 25) or repeat one action, and holds a worker for an hour after
   three failed unattended runs in a row (`cortex autopilot release-hold <worker>`).
+  Each stop records what it counted against which limit, and the dashboard lists
+  recent stopped runs with that reason, which is how the limits get tuned.
 - **Trading guard**: a task whose text matches a Trading Capability Hub playbook
   (read-only, via the Hub's own router) or a built-in trading pattern never
   runs unattended, whichever project it is filed under.

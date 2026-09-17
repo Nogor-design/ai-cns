@@ -133,6 +133,21 @@ class RunSupervisor:
         except sqlite3.Error:
             pass  # a busy database must not stop a healthy run
 
+    def snapshot(self) -> dict[str, object]:
+        """What the supervisor observed, for the audit trail and the panel."""
+        with self._lock:
+            return {
+                "reason": self.stopped_reason,
+                "tool_calls": self.tool_calls,
+                "silent_seconds": round(self._clock() - self._last_output),
+                "limits": {
+                    "max_seconds": self.limits.max_seconds,
+                    "stall_seconds": self.limits.stall_seconds,
+                    "max_tool_calls": self.limits.max_tool_calls,
+                    "repeat_limit": self.limits.repeat_limit,
+                },
+            }
+
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()

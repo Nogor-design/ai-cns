@@ -298,5 +298,10 @@ database, dashboard alert thresholds.
 - The CNS runtime's M2 work is now committed with evidence
   (`docs/m2-evidence.md`); its fenced recovery is what `leases.py` borrows.
 - Supervisor limits are first guesses (`cortex/supervisor.py:WORKER_LIMITS`).
-  Tune them from the soak's stopped-run reasons before Phase 3.
+  Tune them from the soak's stopped-run reasons before Phase 3. The evidence is
+  now collected: a supervisor stop records what it had counted against which
+  limit (`run.supervisor_stopped` activity evidence), and the Autopilot panel
+  lists recent stopped runs with that pairing.
+- `ollama` has no tool-call cap (`max_tool_calls=0`) because it has no tool
+  loop; only its stall and wall-clock limits apply.
 

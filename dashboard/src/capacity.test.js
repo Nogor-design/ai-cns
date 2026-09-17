@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { clampReserve, resetLabel, schedulerState, sortModels, windowLabel, windowTone } from './capacity.js'
+import { clampReserve, resetLabel, schedulerState, sortModels, stopSummary, windowLabel, windowTone } from './capacity.js'
 
 test('window tone tracks the background ceiling', () => {
   assert.equal(windowTone(null, 70), 'unknown')
@@ -48,4 +48,22 @@ test('scheduler state distinguishes live, paused and stopped leases', () => {
   assert.equal(schedulerState({ lease, running: true, paused: true }, now).tone, 'near')
   assert.equal(schedulerState({ lease, running: false }, now).label, 'Stopped 10m ago')
   assert.equal(schedulerState({ lease: { heartbeat_at: 'bad' }, running: false }, now).label, 'Stopped')
+})
+
+test('stop summaries pair the reason with the limit that triggered it', () => {
+  const limits = { max_tool_calls: 25, stall_seconds: 600, repeat_limit: 5 }
+  assert.equal(
+    stopSummary({ supervisor: { reason: 'used more than 25 tool calls', tool_calls: 26, limits } }),
+    'used more than 25 tool calls · 26 of 25 allowed',
+  )
+  assert.equal(
+    stopSummary({ supervisor: { reason: 'no output for 10 minutes', limits } }),
+    'no output for 10 minutes · limit 10 min',
+  )
+  assert.equal(
+    stopSummary({ supervisor: { reason: 'repeated the same action 5 times (pytest)', limits } }),
+    'repeated the same action 5 times (pytest) · limit 5 in a row',
+  )
+  assert.equal(stopSummary({ human_note: 'grok exited with code 1' }), 'grok exited with code 1')
+  assert.equal(stopSummary({}), 'Did not finish; see the run log.')
 })

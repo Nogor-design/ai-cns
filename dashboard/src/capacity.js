@@ -70,3 +70,16 @@ export const INBOX_KIND_LABELS = {
   worker_hold: 'Worker on hold',
   scheduler_error: 'Scheduler error',
 }
+
+// One line explaining a stopped run: what the supervisor counted against which
+// limit, so the owner can judge whether the limit is set right.
+export function stopSummary(stop) {
+  const supervisor = stop?.supervisor
+  if (!supervisor) return stop?.human_note || 'Did not finish; see the run log.'
+  const limits = supervisor.limits || {}
+  const parts = [supervisor.reason]
+  if (/tool calls/.test(supervisor.reason || '')) parts.push(`${supervisor.tool_calls} of ${limits.max_tool_calls} allowed`)
+  else if (/no output/.test(supervisor.reason || '')) parts.push(`limit ${Math.round((limits.stall_seconds || 0) / 60)} min`)
+  else if (/repeated/.test(supervisor.reason || '')) parts.push(`limit ${limits.repeat_limit} in a row`)
+  return parts.filter(Boolean).join(' · ')
+}

@@ -367,3 +367,35 @@ def test_pid_probe_sees_other_processes_without_signalling_them():
         child.wait()
     assert not jobs._pid_is_running(child.pid)
     assert not jobs._pid_is_running(DEAD_PID)
+
+
+def test_stopped_runs_are_listed_with_supervisor_evidence(
+    isolated_db, conn, project, monkeypatch
+):
+    """A stopped run keeps what the supervisor counted, for tuning the limits."""
+    limits = supervisor.Limits(max_tool_calls=3)
+    monkeypatch.setattr(supervisor, "limits_for", lambda worker: limits)
+    fake = FakeDispatch(exit_code=1, raise_after_run="stopped by supervisor: tool calls")
+    task_id = _review_task(conn, project, "Wandering review")
+    pilot = _pilot(isolated_db, conn, project, fake, candidates=[task_id])
+
+    def observe_then_stop(conn_, task, **kwargs):
+        watch = kwargs["watchdog"]
+        for n in range(limits.max_tool_calls + 5):
+            watch.observe(f"  → read_file(f{n}.py)\n")
+        assert "more than" in watch.check()  # what workers.execute polls
+        return fake(conn_, task, **kwargs)
+
+    pilot._dispatch = observe_then_stop
+    pilot.tick()
+    _join(pilot)
+
+    stops = autopilot.recent_stops(conn)
+    assert len(stops) == 1
+    stop = stops[0]
+    assert stop["worker"] == "grok" and stop["title"] == "Wandering review"
+    assert stop["supervisor"]["tool_calls"] == limits.max_tool_calls + 5
+    assert stop["supervisor"]["limits"]["max_tool_calls"] == limits.max_tool_calls
+    assert "more than 3 tool calls" in stop["supervisor"]["reason"]
+    assert autopilot.status(conn)["recent_stops"][0]["id"] == stop["id"]
+    pilot.release()
