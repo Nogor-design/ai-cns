@@ -18,6 +18,8 @@ def isolated_db(tmp_path, monkeypatch):
     # Never read the owner's real provider usage logs from tests.
     monkeypatch.setenv("CORTEX_OPENCODE_DB", str(tmp_path / "no-opencode.db"))
     monkeypatch.setenv("CORTEX_CODEX_SESSIONS", str(tmp_path / "no-codex-sessions"))
+    # The trading guard falls back to built-in patterns without a Hub.
+    monkeypatch.setenv("CORTEX_TRADING_HUB_ROOT", str(tmp_path / "no-trading-hub"))
     return dbfile
 
 

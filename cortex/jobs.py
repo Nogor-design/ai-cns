@@ -11,12 +11,15 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import ids
 
 ACTIVE = "running"
 TERMINAL = {"done", "failed", "interrupted"}
+# Longer than the gaps between heartbeats, including post-run git and test work.
+HEARTBEAT_STALE = timedelta(minutes=30)
 
 
 def create(
@@ -26,13 +29,15 @@ def create(
     label: str | None = None,
     task_id: str | None = None,
     project_id: str | None = None,
+    started_by: str | None = None,
 ) -> str:
     job_id = ids.short_id()
     conn.execute(
         """INSERT INTO jobs
-           (id, kind, status, task_id, project_id, label, pid, created_at)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (job_id, kind, ACTIVE, task_id, project_id, label, os.getpid(), ids.now()),
+           (id, kind, status, task_id, project_id, label, pid, created_at, started_by)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (job_id, kind, ACTIVE, task_id, project_id, label, os.getpid(), ids.now(),
+         started_by),
     )
     conn.commit()
     return job_id
@@ -83,24 +88,48 @@ def recent(conn: sqlite3.Connection, limit: int = 30) -> list[dict[str, Any]]:
 
 
 def reconcile(conn: sqlite3.Connection) -> int:
-    """Close out jobs and runs abandoned by a previous dashboard process.
+    """Close out abandoned jobs; see ``reconcile_details``."""
+    return len(reconcile_details(conn))
+
+
+def _is_stale(row: sqlite3.Row, now: datetime) -> bool:
+    if not _pid_is_running(row["pid"]):
+        return True
+    # A supervised job refreshes its heartbeat every 30 seconds. Long silence
+    # means the owner is hung or the recorded pid now belongs to another process.
+    beat = row["heartbeat_at"]
+    if not beat:
+        return False
+    try:
+        seen = datetime.strptime(beat, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return now - seen > HEARTBEAT_STALE
+
+
+def reconcile_details(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Close out jobs and runs abandoned by a previous process.
 
     A job marked running whose owning process is gone cannot make progress. Its
     task would otherwise sit in `running` forever and be skipped by every
-    scheduler, so it is returned to `blocked` where a person can see it.
+    scheduler, so it is returned to `blocked` where a person can see it. The
+    run's outcome becomes ``unknown``: the work is never replayed blindly,
+    because an interrupted agent may already have had side effects.
     """
     active = conn.execute(
         "SELECT * FROM jobs WHERE status = ?", (ACTIVE,)
     ).fetchall()
-    stale = [row for row in active if not _pid_is_running(row["pid"])]
+    moment = datetime.now(timezone.utc)
+    stale = [row for row in active if _is_stale(row, moment)]
     if not stale:
-        return 0
+        return []
     now = ids.now()
+    recovered: list[dict[str, Any]] = []
     for row in stale:
         conn.execute(
             """UPDATE jobs SET status = 'interrupted', error = ?, completed_at = ?
                WHERE id = ?""",
-            ("Dashboard restarted while this job was running.", now, row["id"]),
+            ("The process running this job stopped before it finished.", now, row["id"]),
         )
         run_ids: list[str] = []
         if row["run_id"]:
@@ -122,9 +151,10 @@ def reconcile(conn: sqlite3.Connection) -> int:
         for run_id in run_ids:
             conn.execute(
                 """UPDATE runs SET ended_at = ?, exit_code = COALESCE(exit_code, 1),
+                       outcome = COALESCE(outcome, 'unknown'),
                        human_note = COALESCE(human_note, ?)
                    WHERE id = ? AND ended_at IS NULL""",
-                (now, "Interrupted by a dashboard restart.", run_id),
+                (now, "Interrupted: the process running it stopped. Not retried.", run_id),
             )
         if row["kind"] == "dispatch" and row["task_id"]:
             conn.execute(
@@ -132,8 +162,13 @@ def reconcile(conn: sqlite3.Connection) -> int:
                 "WHERE id = ? AND status = 'running'",
                 (now, row["task_id"]),
             )
+        recovered.append({
+            "job_id": row["id"], "kind": row["kind"], "task_id": row["task_id"],
+            "project_id": row["project_id"], "run_ids": run_ids,
+            "started_by": row["started_by"],
+        })
     conn.commit()
-    return len(stale)
+    return recovered
 
 
 def _pid_is_running(pid: int | None) -> bool:

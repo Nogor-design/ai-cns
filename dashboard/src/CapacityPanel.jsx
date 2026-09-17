@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Cpu, LoaderCircle, PauseCircle, CirclePlay, RefreshCw, ShieldCheck } from 'lucide-react'
-import { LANE_LABELS, clampReserve, resetLabel, sortModels, windowLabel, windowTone } from './capacity.js'
+import { Check, Cpu, Inbox, LoaderCircle, PauseCircle, CirclePlay, RefreshCw, ShieldCheck, X } from 'lucide-react'
+import { INBOX_KIND_LABELS, LANE_LABELS, clampReserve, resetLabel, schedulerState, sortModels, windowLabel, windowTone } from './capacity.js'
 
 const PROVIDER_LABELS = { codex: 'Codex', claude: 'Claude', opencode: 'OpenCode Go', grok: 'Grok', gemini: 'Gemini', agy: 'Antigravity' }
 const MODE_LABELS = { off: 'Off', read_only: 'Read-only', integration: 'Integration' }
@@ -41,6 +41,55 @@ function QuotaRow({ row, reserve }) {
   </div>
 }
 
+function AutopilotStrip({ pilot, busy, onSave, onInbox }) {
+  const state = schedulerState(pilot)
+  const box = pilot.inbox
+  const holds = Object.entries(pilot.holds || {})
+  return <div className="autopilot-strip">
+    <article className="autopilot-state">
+      <span className="health-label">Autopilot</span>
+      <strong className={`pilot-${state.tone}`}>{state.label}</strong>
+      <p>{pilot.running
+        ? `Holder ${pilot.lease.holder} · checks every ${pilot.interval_seconds}s`
+        : 'Start it with scripts/install-autopilot-task.ps1 -Install, or cortex autopilot run.'}</p>
+      <label className="pilot-slots">
+        <span>Runs at once</span>
+        <select value={pilot.max_concurrent} disabled={Boolean(busy)} onChange={event => onSave({ max_concurrent: Number(event.target.value) }, 'slots')}>
+          {[1, 2, 3, 4, 5, 6].map(value => <option key={value} value={value}>{value}</option>)}
+        </select>
+      </label>
+      {pilot.in_flight.map(run => <p className="pilot-run" key={run.id}><b>{(run.model || '').split(':')[0] || 'worker'}</b> {run.project_name}: {run.title}</p>)}
+      {holds.map(([worker, reason]) => <p className="pilot-hold" key={worker} title={reason}>
+        {worker} on hold <button type="button" onClick={() => onSave({ release_hold: worker }, 'hold')} disabled={Boolean(busy)}>Release</button>
+      </p>)}
+    </article>
+    <article className="autopilot-inbox">
+      <span className="health-label"><Inbox size={12} /> Needs you · {box.open} open{box.queued ? ` · ${box.queued} queued` : ''}</span>
+      <label className="pilot-cap">
+        <span>Daily limit</span>
+        <input type="number" min="1" max="50" defaultValue={box.daily_cap} key={box.daily_cap}
+          onBlur={event => { const value = Number(event.currentTarget.value); if (value && value !== box.daily_cap) onSave({ inbox_daily_cap: value }, 'cap') }}
+          aria-label="Inbox items per day" />
+        <small>{box.surfaced_today} asked today</small>
+      </label>
+      {box.items.length === 0 && <p className="quota-note">Nothing waiting on you.</p>}
+      <ul className="inbox-list">
+        {box.items.map(item => <li key={item.id} data-status={item.status}>
+          <div>
+            <em>{INBOX_KIND_LABELS[item.kind] || item.kind}{item.status === 'queued' ? ' · queued' : ''}</em>
+            <strong>{item.title}</strong>
+            {item.detail && <small>{item.detail}</small>}
+          </div>
+          <span className="inbox-actions">
+            <button type="button" title="Done" aria-label="Mark done" onClick={() => onInbox(item.id, 'resolve')} disabled={Boolean(busy)}><Check size={13} /></button>
+            <button type="button" title="Dismiss" aria-label="Dismiss" onClick={() => onInbox(item.id, 'dismiss')} disabled={Boolean(busy)}><X size={13} /></button>
+          </span>
+        </li>)}
+      </ul>
+    </article>
+  </div>
+}
+
 export default function CapacityPanel({ token, onError }) {
   const [payload, setPayload] = useState(null)
   const [reserve, setReserve] = useState(30)
@@ -69,6 +118,14 @@ export default function CapacityPanel({ token, onError }) {
     } catch (err) { onError?.(err.message) } finally { setBusy('') }
   }
 
+  async function closeInboxItem(itemId, action) {
+    setBusy(itemId)
+    try {
+      await call(`/api/inbox/${itemId}/${action}`, { method: 'POST', token, body: {} })
+      await load()
+    } catch (err) { onError?.(err.message) } finally { setBusy('') }
+  }
+
   async function refresh() {
     setBusy('refresh')
     try {
@@ -87,7 +144,7 @@ export default function CapacityPanel({ token, onError }) {
 
   if (!payload) return <section className="workflow-band capacity-band" id="capacity"><div className="band-heading"><span className="band-icon teal"><Cpu size={18} /></span><div><h2>Capacity &amp; autonomy</h2><p>Loading quota and local compute…</p></div></div></section>
 
-  const { quota, lanes, autonomy } = payload
+  const { quota, lanes, autonomy, autopilot } = payload
   const paused = autonomy.paused
   const hw = lanes.hardware || {}
   const models = sortModels(lanes.models)
@@ -148,5 +205,6 @@ export default function CapacityPanel({ token, onError }) {
         </div>}
       </article>
     </div>
+    {autopilot && <AutopilotStrip pilot={autopilot} busy={busy} onSave={save} onInbox={closeInboxItem} />}
   </section>
 }

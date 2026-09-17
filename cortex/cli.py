@@ -32,7 +32,9 @@ from . import (
     github_reader,
     health,
     ids,
+    inbox,
     lanes,
+    leases,
     pm as pm_mod,
     policy,
     project_blueprints,
@@ -41,6 +43,7 @@ from . import (
     runs as runs_mod,
     state as state_mod,
     store,
+    supervisor,
     team,
     workers,
     webapp,
@@ -70,6 +73,16 @@ capacity_app = typer.Typer(
 )
 app.add_typer(github_app, name="github")
 app.add_typer(capacity_app, name="capacity")
+autopilot_app = typer.Typer(
+    help="The unattended scheduler loop and its supervisor.",
+    no_args_is_help=True,
+)
+inbox_app = typer.Typer(
+    help="Decisions the scheduler needs from the owner (capped per day).",
+    no_args_is_help=True,
+)
+app.add_typer(autopilot_app, name="autopilot")
+app.add_typer(inbox_app, name="inbox")
 
 
 def _configure_console_encoding() -> None:
@@ -1726,6 +1739,150 @@ def capacity_bench(
             f"{row['prompt_tps']} tok/s prompt, load {row['load_seconds']}s, "
             f"{row.get('gpu_percent')}% on GPU"
         )
+
+
+@autopilot_app.command("run")
+def autopilot_run(
+    once: bool = typer.Option(False, "--once", help="Run a single tick, wait for its runs, and exit."),
+    interval: int = typer.Option(0, "--interval", help="Seconds between ticks (default: setting, 60)."),
+    max_concurrent: int = typer.Option(0, "--max-concurrent", help="Also save a new concurrency limit (1-6)."),
+):
+    """Keep approved read-only work moving without the owner.
+
+    Holds the scheduler lease, so a second copy waits instead of doubling up.
+    Stop with Ctrl+C: new starts stop at once and in-flight runs finish.
+    """
+    import threading
+
+    from . import autopilot
+
+    conn = _conn()
+    if max_concurrent:
+        autopilot.set_max_concurrent(conn, max_concurrent)
+    database_path = conn.execute("PRAGMA database_list").fetchone()[2]
+    conn.close()
+    pilot = autopilot.Autopilot(database_path)
+    if not pilot.acquire():
+        with db.connect(database_path) as check:
+            holder = leases.describe(check, leases.SCHEDULER_LEASE) or {}
+        typer.secho(
+            f"Another scheduler holds the lease ({holder.get('holder')}, pid {holder.get('pid')}).",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        raise typer.Exit(3)
+    typer.echo(f"Autopilot running as {pilot.holder} (fence {pilot.lease.fence}).")
+
+    def show(report) -> None:
+        started = ", ".join(f"{item['worker']}: {item['title'][:50]}" for item in report.started)
+        held = len([key for key in report.skipped if key != "*"])
+        line = f"[{report.at}] in flight {report.in_flight}"
+        if report.paused:
+            line += " | paused"
+        if started:
+            line += f" | started {started}"
+        if held:
+            line += f" | held {held}"
+        if report.recovered:
+            line += f" | recovered {report.recovered}"
+        if report.note and not report.paused:
+            line += f" | {report.note}"
+        typer.echo(line)
+
+    stop = threading.Event()
+    try:
+        if once:
+            try:
+                show(pilot.tick())
+            finally:
+                for thread in list(pilot._threads.values()):
+                    thread.join()
+                pilot.release()
+            return
+        pilot.run_forever(stop, interval=interval or None, on_tick=show)
+    except KeyboardInterrupt:
+        stop.set()
+        typer.echo("Stopping: no new starts; waiting for in-flight runs to finish.")
+        for thread in list(pilot._threads.values()):
+            thread.join()
+        pilot.release()
+    except autopilot.LeaseLost as exc:
+        typer.secho(f"Stopped: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(4)
+
+
+@autopilot_app.command("status")
+def autopilot_status(as_json: bool = typer.Option(False, "--json")):
+    """Show the scheduler lease, in-flight runs, holds and inbox counts."""
+    from . import autopilot
+
+    conn = _conn()
+    data = autopilot.status(conn)
+    if as_json:
+        typer.echo(json.dumps(data, indent=2, default=str))
+        return
+    lease = data["lease"] or {}
+    typer.echo(
+        f"Scheduler: {'running' if data['running'] else 'not running'}"
+        + (f" ({lease.get('holder')}, last heartbeat {lease.get('heartbeat_at')})" if lease else "")
+    )
+    typer.echo(
+        f"Paused: {'yes' if data['paused'] else 'no'} | slots {data['max_concurrent']}"
+        f" | tick every {data['interval_seconds']}s"
+    )
+    for row in data["in_flight"]:
+        typer.echo(f"  running  {row['model'] or '?':<34} {row['project_name']}: {row['title']}")
+    for worker, reason in data["holds"].items():
+        typer.echo(f"  hold     {worker}: {reason}")
+    box = data["inbox"]
+    typer.echo(
+        f"Inbox: {box['open']} open, {box['queued']} queued "
+        f"({box['surfaced_today']}/{box['daily_cap']} surfaced today)"
+    )
+
+
+@autopilot_app.command("release-hold")
+def autopilot_release_hold(worker: str = typer.Argument(...)):
+    """Let a held worker receive unattended work again."""
+    conn = _conn()
+    supervisor.release_worker(conn, worker)
+    typer.echo(f"{worker}: hold released.")
+
+
+@inbox_app.command("list")
+def inbox_list(all_items: bool = typer.Option(False, "--all", help="Include closed items.")):
+    """Show open and queued owner decisions."""
+    conn = _conn()
+    rows = inbox.items(conn, include_closed=all_items)
+    if not rows:
+        typer.echo("Inbox is empty.")
+        return
+    for row in rows:
+        where = row["project_name"] or "-"
+        typer.echo(f"{row['id']}  {row['status']:<9} {row['kind']:<14} {where}: {row['title']}")
+        if row["detail"]:
+            typer.echo(f"    {row['detail'][:300]}")
+
+
+@inbox_app.command("resolve")
+def inbox_resolve(
+    item_id: str = typer.Argument(...),
+    dismiss: bool = typer.Option(False, "--dismiss", help="Close without acting."),
+    note: str = typer.Option("", "--note"),
+):
+    """Close an inbox item."""
+    conn = _conn()
+    ok = inbox.resolve(conn, item_id, status="dismissed" if dismiss else "resolved",
+                       note=note or None)
+    if not ok:
+        _err(f"No open inbox item {item_id}.")
+    typer.echo(f"{item_id}: {'dismissed' if dismiss else 'resolved'}.")
+
+
+@inbox_app.command("cap")
+def inbox_cap(value: int = typer.Argument(..., help="Items surfaced per day (1-50).")):
+    """Set how many inbox items may surface per day."""
+    conn = _conn()
+    typer.echo(f"Inbox daily cap: {inbox.set_daily_cap(conn, value)}")
 
 
 if __name__ == "__main__":  # pragma: no cover

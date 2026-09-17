@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -356,6 +356,39 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
     observed_at  TEXT NOT NULL
 );
 
+-- Named leases so only one scheduler runs at a time. ``fence`` increases on
+-- every takeover; a holder whose fence no longer matches must stop starting work.
+CREATE TABLE IF NOT EXISTS leases (
+    name         TEXT PRIMARY KEY,
+    holder       TEXT NOT NULL,
+    pid          INTEGER,
+    fence        INTEGER NOT NULL DEFAULT 0,
+    acquired_at  TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    detail_json  TEXT
+);
+
+-- Decisions the owner is asked to make. ``queued`` items wait for room under
+-- the daily cap; ``dedupe_key`` stops the scheduler asking the same thing twice.
+CREATE TABLE IF NOT EXISTS inbox (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,              -- run_failed | stalled | interrupted | ...
+    status      TEXT NOT NULL,              -- open | queued | resolved | dismissed
+    title       TEXT NOT NULL,
+    detail      TEXT,
+    project_id  TEXT,
+    task_id     TEXT,
+    run_id      TEXT,
+    dedupe_key  TEXT UNIQUE,
+    created_at  TEXT NOT NULL,
+    surfaced_at TEXT,
+    resolved_at TEXT,
+    resolution  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox(status, created_at);
+
 CREATE TABLE IF NOT EXISTS local_benchmarks (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     model              TEXT NOT NULL,
@@ -487,6 +520,12 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     },
     "activity_events": {
         "session_id": "TEXT",
+    },
+    "jobs": {
+        # Refreshed while a supervised run is alive; recovery treats a long
+        # silence as abandoned even if the recorded pid has been reused.
+        "heartbeat_at": "TEXT",
+        "started_by": "TEXT",
     },
     "project_blueprint_drafts": {
         "planning_task_id": "TEXT REFERENCES tasks(id)",

@@ -12,14 +12,18 @@ from pathlib import Path
 from . import brief as brief_mod
 from . import (
     autonomy, capacity, config, evidence, gitutil, ids, lanes, policy, routing,
-    runlog, runs, secrets_scan, project_blueprints, store, workers, worktrees,
+    runlog, runs, secrets_scan, project_blueprints, store, supervisor,
+    trading_guard, workers, worktrees,
 )
 
 SCHEDULER = "scheduler"
 
 
 class DispatchError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, run_id: str | None = None) -> None:
+        super().__init__(message)
+        # Set when the failure happened after a run row existed.
+        self.run_id = run_id
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,8 @@ def dispatch(
     timeout: int = 1800,
     on_run_start: Callable[[str], None] | None = None,
     started_by: str = "owner",
+    watchdog: Callable[[], str | None] | None = None,
+    observer: Callable[[str], None] | None = None,
 ) -> DispatchResult:
     project = store.get_project(conn, task["project_id"])
     planned = preview(
@@ -153,7 +159,7 @@ def dispatch(
     if started_by == SCHEDULER:
         # Checked here, at the last moment, as well as when candidates are
         # chosen: settings and quota can change between the two.
-        refusal = unattended_refusal(conn, project, route)
+        refusal = unattended_refusal(conn, project, route, task)
         if refusal:
             raise DispatchError(refusal)
         admitted = admission_evidence(conn, route)
@@ -228,10 +234,32 @@ def dispatch(
         ),
     )
     try:
+        supervised = {"watchdog": watchdog} if watchdog is not None else {}
         result = workers.execute(
             command, workspace=workspace, brief=planned.brief, timeout=timeout,
-            on_output=lambda text: runlog.append(run_id, text),
+            on_output=lambda text: _observe(run_id, text, observer),
+            **supervised,
         )
+    except workers.WorkerStopped as exc:
+        # Keep what the stopped run cost and any quota it reported.
+        partial = workers.WorkerResult(
+            exit_code=1, stdout=exc.stdout, stderr=exc.stderr, usage=exc.usage
+        )
+        _record_quota(conn, route.worker, partial, run_id)
+        store.update_run(
+            conn,
+            run_id,
+            ended_at=ids.now(),
+            exit_code=1,
+            outcome="unknown",
+            response=workers.extract_text(exc.stdout) if exc.stdout else None,
+            human_note=f"Stopped by the Cortex supervisor: {exc.reason}",
+            workspace_path=str(workspace),
+            command_json=json.dumps(command.argv),
+            usage_json=json.dumps(exc.usage) if exc.usage else None,
+        )
+        store.update_task(conn, task["id"], status="blocked")
+        raise DispatchError(f"stopped by supervisor: {exc.reason}", run_id=run_id) from exc
     except workers.WorkerError as exc:
         runlog.append(run_id, f"\n[cortex] run failed: {exc}\n")
         store.update_run(
@@ -244,7 +272,7 @@ def dispatch(
             command_json=json.dumps(command.argv),
         )
         store.update_task(conn, task["id"], status="blocked")
-        raise DispatchError(str(exc)) from exc
+        raise DispatchError(str(exc), run_id=run_id) from exc
 
     _record_quota(conn, route.worker, result, run_id)
     changed = gitutil.changed_files(workspace, before) if write else []
@@ -303,13 +331,29 @@ def dispatch(
     )
 
 
+def _observe(run_id: str, text: str, observer: Callable[[str], None] | None) -> None:
+    runlog.append(run_id, text)
+    if observer is not None:
+        observer(text)
+
+
 def unattended_refusal(
-    conn: sqlite3.Connection, project: sqlite3.Row, route: routing.Route
+    conn: sqlite3.Connection,
+    project: sqlite3.Row,
+    route: routing.Route,
+    task: sqlite3.Row | None = None,
 ) -> str | None:
     """Why the scheduler may not start this route now, or None."""
     reason = autonomy.unattended_refusal(
         conn, project, write=route.action == "implement"
     )
+    if reason:
+        return reason
+    if task is not None:
+        reason = trading_guard.refusal(task)
+        if reason:
+            return reason
+    reason = supervisor.worker_hold(conn, route.worker)
     if reason:
         return reason
     if route.worker in capacity.LOCAL:

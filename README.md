@@ -71,6 +71,24 @@ keep working without the owner. Phase 1 adds:
   dollar spend against the monthly limit you set (`cortex capacity go-limit`).
 - `cortex capacity show|refresh [--probe]|reserve|go-limit|pause|resume|autonomy|bench`.
 
+Phase 2 adds the scheduler itself:
+
+- `cortex autopilot run` keeps assigned read-only work moving. A database lease
+  allows one scheduler at a time (a second copy exits with code 3), and every
+  start is logged with the quota or lane evidence that allowed it.
+- A **supervisor** stops runs that go silent, exceed their tool-call budget
+  (Antigravity: 25) or repeat one action, and holds a worker for an hour after
+  three failed unattended runs in a row (`cortex autopilot release-hold <worker>`).
+- **Trading guard**: a task whose text matches a Trading Capability Hub playbook
+  (read-only, via the Hub's own router) or a built-in trading pattern never
+  runs unattended, whichever project it is filed under.
+- **Recovery**: work orphaned by a dead process is marked `unknown`, its task is
+  blocked, and it is never replayed blindly.
+- **Owner inbox** (`cortex inbox list|resolve|cap`, and the dashboard): failed,
+  stopped and interrupted runs; at most 8 items surface per day by default.
+- `scripts\install-autopilot-task.ps1` previews, and with `-Install` registers, a
+  logon task. Pause everything from the dashboard or `cortex capacity pause`.
+
 
 ## Which worker may see which repository
 

@@ -48,3 +48,25 @@ export function sortModels(models) {
     .filter(model => !String(model.name).includes('/'))
     .sort((a, b) => order.indexOf(a.lane) - order.indexOf(b.lane) || a.size_gb - b.size_gb)
 }
+
+// A scheduler is only "running" while its lease is live; a lease that stopped
+// renewing means the process died or hung, which the owner should see.
+export function schedulerState(pilot, now = Date.now()) {
+  const lease = pilot?.lease
+  if (!lease) return { label: 'Not started', tone: 'idle' }
+  if (pilot.running) {
+    return pilot.paused
+      ? { label: 'Running · paused', tone: 'near' }
+      : { label: 'Running', tone: 'ok' }
+  }
+  const beat = new Date(lease.heartbeat_at).getTime()
+  const minutes = Number.isNaN(beat) ? null : Math.round((now - beat) / 60_000)
+  return { label: minutes == null ? 'Stopped' : `Stopped ${minutes}m ago`, tone: 'idle' }
+}
+
+export const INBOX_KIND_LABELS = {
+  run_failed: 'Run failed',
+  interrupted: 'Interrupted',
+  worker_hold: 'Worker on hold',
+  scheduler_error: 'Scheduler error',
+}

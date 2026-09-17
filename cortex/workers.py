@@ -268,6 +268,37 @@ def build_command(
     raise WorkerError(f"unknown worker: {worker}")
 
 
+WATCHDOG_POLL_SECONDS = 3.0
+
+
+class WorkerStopped(WorkerError):
+    """The supervisor stopped a worker; carries what it had written so far."""
+
+    def __init__(self, reason: str, stdout: str = "", stderr: str = "") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.stdout = stdout
+        self.stderr = stderr
+        self.usage = _extract_usage(stdout) if stdout else None
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:  # type: ignore[type-arg]
+    """Stop a worker and its children; the CLIs spawn node/python helpers."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            capture_output=True, check=False,
+        )
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def execute(
     spec: CommandSpec,
     *,
@@ -275,6 +306,7 @@ def execute(
     brief: str,
     timeout: int,
     on_output: Callable[[str], None] | None = None,
+    watchdog: Callable[[], str | None] | None = None,
 ) -> WorkerResult:
     """Run a worker, reporting output as it arrives.
 
@@ -282,6 +314,9 @@ def execute(
     It is the difference between a progress bar that means nothing and being
     able to see what an agent is doing; failures in the callback are ignored so
     a logging problem can never kill a run.
+
+    ``watchdog`` is polled every few seconds while a CLI worker runs; a returned
+    reason stops the worker and its child processes and raises WorkerStopped.
     """
     def emit(text: str) -> None:
         if on_output and text:
@@ -302,7 +337,7 @@ def execute(
         raise WorkerError(f"worker command is not available: {_executable(spec.worker)}")
     try:
         return _stream_subprocess(spec, workspace=workspace, brief=brief,
-                                  timeout=timeout, emit=emit)
+                                  timeout=timeout, emit=emit, watchdog=watchdog)
     except OSError as exc:
         raise WorkerError(str(exc)) from exc
 
@@ -314,6 +349,7 @@ def _stream_subprocess(
     brief: str,
     timeout: int,
     emit: Callable[[str], None],
+    watchdog: Callable[[], str | None] | None = None,
 ) -> WorkerResult:
     env = None
     if spec.env:
@@ -374,15 +410,32 @@ def _stream_subprocess(
 
         threading.Thread(target=feed, daemon=True).start()
 
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        for reader in readers:
-            reader.join(timeout=5)
-        emit(f"\n[cortex] worker exceeded its {timeout}s budget and was stopped.\n")
-        raise WorkerError(f"worker timed out after {timeout}s")
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        try:
+            proc.wait(timeout=max(0.05, min(WATCHDOG_POLL_SECONDS, remaining)))
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if time.monotonic() >= deadline:
+            _kill_tree(proc)
+            for reader in readers:
+                reader.join(timeout=5)
+            emit(f"\n[cortex] worker exceeded its {timeout}s budget and was stopped.\n")
+            raise WorkerError(f"worker timed out after {timeout}s")
+        if watchdog is None:
+            continue
+        try:
+            reason = watchdog()
+        except Exception:  # supervision must never kill a healthy run
+            reason = None
+        if reason:
+            _kill_tree(proc)
+            for reader in readers:
+                reader.join(timeout=5)
+            emit(f"\n[cortex] supervisor stopped the worker: {reason}\n")
+            raise WorkerStopped(reason, "".join(out_parts), "".join(err_parts))
     for reader in readers:
         reader.join(timeout=10)
 

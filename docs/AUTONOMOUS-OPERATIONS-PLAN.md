@@ -80,7 +80,7 @@ as a second database.
 Each phase lists scope, explicit non-goals, and exit criteria. A phase is done
 only when its exit criteria are verified and recorded in Cortex.
 
-### Phase 1 — Guardrails, capacity visibility, adapters (current)
+### Phase 1 — Guardrails, capacity visibility, adapters (done)
 
 Scope:
 - `cortex/autonomy.py`: protected-project rules (trading via Hub registry +
@@ -129,7 +129,7 @@ above the default 70% background ceiling until reset); Claude five-hour 29%,
 seven-day 14%. opencode's system prompt is ~17.7k tokens, and a trivial turn on
 `qwen3-coder:30b` took ~56 s with the model split 58% CPU / 42% GPU.
 
-### Phase 2 — Unattended scheduler and supervisor
+### Phase 2 — Unattended scheduler and supervisor (implemented; soak pending)
 
 Scope: a single scheduler loop (`cortex autopilot`) with a database lease so only
 one runs; per-run heartbeat and timeout; restart recovery that marks orphaned
@@ -144,6 +144,13 @@ Non-goals: write autonomy, auto-merge.
 Exit: 8-hour read-only soak across at least three providers with no quota
 breach of the reserve, no duplicate runs after a forced restart, and every start
 explained in the activity log.
+
+Added during implementation (owner request to fold in the Trading Capability
+Hub): a task-content trading guard. Project rules alone miss a trading
+procedure filed under an ordinary project, so unattended admission also asks
+the Hub's own playbook router (loaded read-only by file path) and a built-in
+pattern list. A broken or missing Hub falls back to the patterns, never to
+"allowed".
 
 ### Phase 3 — Verification gates and integration auto-merge
 
@@ -217,6 +224,21 @@ database, dashboard alert thresholds.
   20%, week = 50%). An unattended end-to-end review cost $0.0033 (19.5k input,
   38.5k cached, 293 output tokens) and changed no files.
 
+- 2026-09-17: Phase 2 implemented on `claude/autopilot`
+  (`cortex/autopilot.py`, `leases.py`, `supervisor.py`, `inbox.py`,
+  `trading_guard.py`; schema v15 adds `leases`, `inbox`, `jobs.heartbeat_at`,
+  `jobs.started_by`). Verified on a copy of the live database with a scratch
+  repository: one tick started OpenCode Go, Antigravity and Grok together; all
+  three finished read-only reviews in 9-18 s and found the planted bug (Go cost
+  $0.0032). Killing the scheduler mid-run and restarting it marked the run
+  `unknown`, blocked the task, filed an inbox item and did not replay it; the
+  new holder took the lease at a higher fence. A second scheduler exited with
+  code 3. 274 Python and 28 dashboard tests pass; the dashboard builds.
+  Not yet done: the 8-hour soak. The live portfolio has no `assigned` tasks
+  (15 wait in `review`, 2 in progress), so an installed scheduler would idle
+  until tasks are approved -- which is Phase 5's problem to solve, not a reason
+  to invent work.
+
 ## 8. Phase 1 findings and follow-ups
 
 - OpenCode Go spend is read only from this machine's opencode database, and its
@@ -244,3 +266,37 @@ database, dashboard alert thresholds.
   the unknown-quota check; Phase 2's scheduler lease removes this race.
 - Live NinjaTrader was running during testing, which correctly held hybrid
   models (including opencode's default `qwen3-coder:30b`) from unattended work.
+
+## 9. Phase 2 findings and follow-ups
+
+- The Trading Capability Hub router accepts a half-phrase match (score 0.5), so
+  one shared word matches a two-word phrase: "Summarize open PRs" routes to
+  `nt-ensure-ready`. Cortex requires a majority (> 0.5). The Hub was not
+  edited because another agent had uncommitted work there; its routing tests
+  should add an unrelated two-word near-miss.
+- The guard still refuses some non-trading phrasings ("optimize these parameters
+  for the build cache"). That is the safe direction: the task is held with a
+  reason, not run.
+- `D:\trading-knowledge` is not registered in Cortex. Its name makes it
+  protected if it is. Its governed authoring loop (local Ollama drafts ->
+  schema and reference gates -> apply as `draft` only) is the pattern Phase 3's
+  verification gate should copy, and its indicator curation is the kind of
+  local-lane work that could run unattended if the owner exempts it. That
+  exemption is an owner decision and a code change.
+- The Hub's generated-context drift check (registry -> rendered bundle ->
+  installed file, failing hard on stale installs) is the model for Phase 4's
+  skill cards, rendered once per tool from one source.
+- Both repositories expose read-only MCP servers (`trading-hub`, `tk`). Cortex
+  does not hand them to unattended agents; trading work is out of scope.
+- Open-source components from the CNS design (NVIDIA NOOA, NeMo Switchyard,
+  OpenShell, Temporal/LangGraph) were not adopted. Phase 2 needed a lease and a
+  watchdog, which SQLite and the existing job table provide. Revisit
+  **OpenShell** in Phase 3 as the write-isolation backend (WSL2 support is
+  experimental; adopt only after its enforcement tests pass here) and
+  **Switchyard** in Phase 4 as an A/B against the rule router. NOOA adds typed
+  agent objects that Cortex's CLI-boundary design does not need.
+- The CNS runtime's M2 work is now committed with evidence
+  (`docs/m2-evidence.md`); its fenced recovery is what `leases.py` borrows.
+- Supervisor limits are first guesses (`cortex/supervisor.py:WORKER_LIMITS`).
+  Tune them from the soak's stopped-run reasons before Phase 3.
+
