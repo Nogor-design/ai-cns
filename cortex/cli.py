@@ -1616,6 +1616,7 @@ def _print_quota(conn: sqlite3.Connection) -> None:
 def capacity_show():
     """Show quota windows, local lanes, and autonomy status."""
     conn = _conn()
+    capacity.refresh(conn)
     _print_quota(conn)
     lane = lanes.payload(conn)
     hw = lane["hardware"]
