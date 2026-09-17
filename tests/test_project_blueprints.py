@@ -195,6 +195,28 @@ def test_saved_interview_compiles_deterministic_preview_and_closes_pm_session(
     assert json.loads(stored["preview_json"])["markdown"] == prepared["markdown"]
     assert stored["previewed_at"]
 
+    # Legacy dashboard builds could demote only the project row when reopening
+    # an otherwise valid, restart-safe review. Projection must show the durable
+    # truth without mutating on read; reopening then repairs the stored status.
+    conn.execute(
+        "UPDATE projects SET blueprint_status='draft' WHERE id=?", (project_id,)
+    )
+    conn.commit()
+    projected = project_blueprints.projection(conn, project_id)
+    assert projected["status"] == "review"
+    assert projected["draft"]["stage"] == "review"
+    assert projected["draft"]["preview_fingerprint"] == prepared["preview_fingerprint"]
+    assert projected["draft"]["previewed_at"] == stored["previewed_at"]
+    assert conn.execute(
+        "SELECT blueprint_status FROM projects WHERE id=?", (project_id,)
+    ).fetchone()[0] == "draft"
+
+    reopened = project_blueprints.begin_draft(conn, project_id)
+    assert reopened["stage"] == "review"
+    assert conn.execute(
+        "SELECT blueprint_status FROM projects WHERE id=?", (project_id,)
+    ).fetchone()[0] == "review"
+
     approved = project_blueprints.approve_draft(
         conn,
         project_id,
@@ -248,6 +270,43 @@ def test_editing_saved_answers_invalidates_exact_blueprint_preview(conn, tmp_pat
             project_id,
             preview_fingerprint=prepared["preview_fingerprint"],
         )
+
+
+def test_projection_does_not_promote_an_invalid_legacy_review(conn, tmp_path):
+    repo = tmp_path / "invalid-legacy-review"
+    repo.mkdir()
+    project_id = store.create_project(
+        conn, name="Invalid legacy review", repo_path=str(repo)
+    )
+    answers = {
+        "users_and_problem": "Operators need a trusted review state.",
+        "desired_outcome": "Only a valid exact preview is owner-review ready.",
+        "non_goals": "Do not repair data during a read.",
+        "constraints": "Invalid fingerprints fail closed.",
+        "open_decision": "No open decision currently.",
+        "phase_name": "Review integrity",
+        "phase_outcome": "Legacy review projection is deterministic.",
+        "phase_exit_criteria": "Invalid preview remains draft",
+    }
+    project_blueprints.begin_draft(
+        conn, project_id, answers=answers, stage="planning"
+    )
+    project_blueprints.draft_preview(conn, project_id)
+    conn.execute(
+        "UPDATE projects SET blueprint_status='draft' WHERE id=?", (project_id,)
+    )
+    conn.execute(
+        """UPDATE project_blueprint_drafts
+           SET preview_fingerprint='mismatched-fingerprint' WHERE project_id=?""",
+        (project_id,),
+    )
+    conn.commit()
+
+    projected = project_blueprints.projection(conn, project_id)
+
+    assert projected["status"] == "draft"
+    assert projected["draft"]["stage"] == "review"
+    assert projected["execution_ready"] is False
 
 
 def test_process_crash_after_blueprint_file_write_fails_closed(

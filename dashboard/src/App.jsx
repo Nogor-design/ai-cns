@@ -8,6 +8,7 @@ import {
 import { filterAndGroupTimeline } from './timeline.js'
 import { mirrorActionLabel, mirrorStatusMeta } from './githubMirror.js'
 import { renderBlueprintMarkdown, renderBlueprintPlanBasis } from './blueprintRenderer.js'
+import { blueprintLifecycleMeta } from './blueprintLifecycle.js'
 import RoadmapView from './RoadmapView.jsx'
 import AddProjectModal from './AddProjectModal.jsx'
 import RemoveProjectModal from './RemoveProjectModal.jsx'
@@ -417,13 +418,13 @@ function DrawerTask({ task, onTaskUpdate, onStart, onCodex, onGithub }) {
 }
 
 function BlueprintPanel({ blueprint, onBuild, onDecompose, onDependencies, onEvidence, onViewDocument }) {
-  const status = blueprint?.status || 'missing'
+  const lifecycle = blueprintLifecycleMeta(blueprint)
+  const { status } = lifecycle
   const current = blueprint?.phases?.find(phase => phase.id === blueprint.current_phase_id)
   const phaseQuality = blueprint?.phase_quality || null
-  const onboarding = ['missing', 'draft', 'review'].includes(status)
   return <section className={`blueprint-panel blueprint-${status}`}>
-    <div className="drawer-section-head"><label><BookOpen size={13} />Project blueprint</label><span className="blueprint-status">{status === 'missing' ? 'Blueprint needed' : pretty(status)}</span></div>
-    {onboarding ? <><p>{status === 'missing' ? 'Cortex has no approved design and phase contract for this legacy project yet. Existing work remains available.' : 'The guided blueprint interview is saved locally and can be resumed without repeating repository discovery.'}</p><button type="button" className="build-blueprint-action" onClick={onBuild}><BookOpen size={14} />{status === 'missing' ? 'Build project blueprint' : 'Resume blueprint interview'}</button></> : <>
+    <div className="drawer-section-head"><label><BookOpen size={13} />Project blueprint</label><span className="blueprint-status">{lifecycle.label}</span></div>
+    {lifecycle.onboarding ? <><p>{lifecycle.description}</p>{lifecycle.previewFingerprint && <div className="blueprint-review-fingerprint"><small>Saved preview fingerprint</small><code>{lifecycle.previewFingerprint}</code></div>}<button type="button" className="build-blueprint-action" onClick={onBuild}><BookOpen size={14} />{lifecycle.actionLabel}</button></> : <>
       {current && <div className="current-phase-summary"><small>Current phase</small><strong>{current.name}</strong><span>{current.outcome}</span>{current.progress && <div className="current-phase-progress"><i><span style={{ width: `${current.progress.percent}%` }} /></i><small>{current.progress.accepted}/{current.progress.total} accepted criteria · {current.progress.percent}%</small></div>}</div>}
       {phaseQuality && <div className="blueprint-phase-quality">
         <div className="current-phase-summary"><small>Phase evidence quality</small><strong>{phaseQuality.coverage.accepted}/{phaseQuality.coverage.total} accepted ({phaseQuality.coverage.percent}%)</strong><span>{phaseQuality.stale_phase_count ? `${phaseQuality.stale_phase_count} stale phase${phaseQuality.stale_phase_count === 1 ? '' : 's'}` : 'No stale phases'}</span></div>
@@ -717,6 +718,7 @@ export default function App() {
       method: 'POST', body: JSON.stringify({ answers, stage }),
       headers: { 'X-Cortex-Action-Token': data.action_token },
     })
+    await load(true)
     return payload.draft
   }
   async function previewBlueprintDraft(projectId) {
@@ -724,6 +726,7 @@ export default function App() {
       method: 'POST', body: '{}',
       headers: { 'X-Cortex-Action-Token': data.action_token },
     })
+    await load(true)
     return payload.preview
   }
   async function approveBlueprint(projectId, preview) {

@@ -1,0 +1,542 @@
+Yes. This AVO work is highly relevant to what you have been describing with a **continuously operating CNS / autonomous development system**. The most important part is not the ARC score itself; it is the architecture NVIDIA used to keep an agent productive after the original model context would normally become useless.
+
+NVIDIA describes AVO as a general-purpose coding-agent architecture designed specifically for sustained autonomous work. In one experiment it ran for **seven days**, explored more than **500 optimization directions**, and produced 40 committed GPU-kernel versions. For ARC-AGI-3, the same general architecture completed all 183 public levels with Claude Opus 5. NVIDIA is careful to say that the ARC comparison is not a controlled ablation, so the result does **not** prove that AVO alone turns a 30% model into a 100% model. ([NVIDIA Developer][1])
+
+## The really important idea in AVO
+
+A typical agent works approximately like this:
+
+```text
+Prompt
+   ↓
+LLM
+   ↓
+Tool call
+   ↓
+Result
+   ↓
+LLM
+   ↓
+...
+Context fills up
+   ↓
+Performance deteriorates / agent loses direction
+```
+
+AVO moves the important state **outside the temporary context window**.
+
+Its conceptual loop looks much more like:
+
+```text
+                    ┌───────────────┐
+                    │     Goal      │
+                    └───────┬───────┘
+                            ↓
+                    ┌───────────────┐
+                    │ Inspect State │
+                    └───────┬───────┘
+                            ↓
+                    ┌───────────────┐
+                    │   Hypothesis  │
+                    └───────┬───────┘
+                            ↓
+                    ┌───────────────┐
+                    │     Act       │
+                    └───────┬───────┘
+                            ↓
+                    ┌───────────────┐
+                    │   Evaluate    │
+                    └───────┬───────┘
+                            ↓
+             ┌────────── Did it improve? ──────────┐
+             │                                      │
+            YES                                    NO
+             ↓                                      ↓
+       Commit lineage                        Record failure
+             │                                      │
+             └──────────────┬───────────────────────┘
+                            ↓
+                 Persistent Knowledge
+                            ↓
+                       Supervisor
+                            ↓
+              stuck / repetitive / progress?
+                            ↓
+                      Next iteration
+```
+
+NVIDIA explicitly identifies **persistent memory and supervision** as the two mechanisms that let AVO work beyond one model context. Memory preserves previous implementations, evaluations, compiler/profiler output and accumulated reasoning. A supervisor watches for stagnation or repeated unproductive cycles and redirects the worker when necessary. ([NVIDIA Developer][1])
+
+That distinction is fundamental:
+
+> **Context is working memory. It should not be your agent's long-term memory.**
+
+This is the mistake I see in a lot of "long-running agent" architectures.
+
+---
+
+# The tools have become considerably better
+
+There are now several pieces that I think fit what you're trying to build.
+
+| Tool                            | Role                        | Why I think it matters                                                    |
+| ------------------------------- | --------------------------- | ------------------------------------------------------------------------- |
+| **NVIDIA NOOA**                 | Agent architecture          | Explicit persistent object state, typed interfaces, memory, summarization |
+| **OpenAI Agents API**           | Long-running Codex harness  | Codex harness with managed environments, compaction and subagents         |
+| **Claude Managed Agents / SDK** | Long-running Claude harness | Managed sessions, compaction, tools, persistent agent infrastructure      |
+| **Temporal**                    | Durable outer orchestrator  | Survives crashes/restarts and can run workflows for days/weeks            |
+| **LangGraph**                   | Stateful agent runtime      | Checkpoints, resume, human intervention, branching                        |
+| **NVIDIA OpenShell**            | Safe execution environment  | Lets autonomous agents modify/run code without owning your machine        |
+| **NeMo Switchyard**             | Model router                | Dynamically chooses frontier vs cheaper/local model                       |
+| **Git + SQLite/Postgres**       | Objective state/lineage     | Simple, inspectable durable memory and experiment history                 |
+
+There are two in that table that I think you should particularly investigate.
+
+---
+
+# 1. NVIDIA NOOA is especially interesting
+
+This was probably the most interesting thing I found while following the NVIDIA work.
+
+**NVIDIA-labs Object Oriented Agents (NOOA)** is an open-source Python framework in which an agent is literally represented as a Python object. State lives on the object instead of being hidden inside giant prompts.
+
+For example, conceptually:
+
+```python
+class ResearchAgent(Agent):
+
+    current_goal
+    hypotheses
+    experiments
+    rejected_ideas
+    best_result
+    todo
+    knowledge
+
+    async def investigate(...)
+    async def experiment(...)
+    async def evaluate(...)
+    async def remember(...)
+```
+
+That architecture is much closer to the CNS system you've been thinking about than the normal:
+
+```python
+while True:
+    send_everything_to_llm()
+```
+
+NOOA supports typed I/O, deterministic Python orchestration, event sourcing, testing/tracing and a separate long-term-memory package. ([GitHub][2])
+
+Even more interesting, NVIDIA's `nooa-memory` gives agents persistent memory stored locally in SQLite. The agent itself can:
+
+```text
+remember()
+recall()
+update_memory()
+forget()
+associate()
+reflect()
+```
+
+It supports memory relationships, retrieval scoring, reconsolidation, abstraction, pruning and reflection. NVIDIA also explicitly notes an important limitation: memory can hurt performance when stale or incorrectly consolidated. That's exactly the kind of finding that matters for a real CNS rather than a demo. ([GitHub][3])
+
+NOOA also has context summarization. Their design principle is essentially that a long-running agent does **not** need to keep infinite context; it needs bounded context plus durable external state. ([GitHub][4])
+
+[NVIDIA NOOA GitHub repository](https://github.com/NVIDIA-NeMo/labs-OO-Agents?utm_source=chatgpt.com)
+
+I would study this code fairly closely.
+
+---
+
+# 2. OpenAI's new Agents API changes the equation
+
+This was released only **September 10, 2026**.
+
+OpenAI now exposes the same type of Codex harness used for long-running software development as the **Agents API**. OpenAI specifically describes the infrastructure as designed to keep agents working reliably for **days**, including files, code execution and intermediate results. ([OpenAI][5])
+
+The important features for your purpose are:
+
+* automatic context compaction
+* persistent working environments
+* MCP/tool support
+* subagents with their own contexts
+* file and code environments
+* managed long-duration execution
+
+That means if you wanted to test your CNS concept with Codex, you don't have to implement every detail of the inner coding-agent loop yourself anymore.
+
+Your architecture could instead be:
+
+```text
+YOUR CNS
+    │
+    ├── decides what needs attention
+    │
+    ├── creates objective
+    │
+    └── launches
+           ↓
+     OpenAI Agent
+           ↓
+      hours of work
+           ↓
+        results
+           ↓
+    CNS evaluates/stores
+```
+
+The CNS becomes the **executive system**, while Codex is one of its cognitive workers.
+
+[OpenAI Agents API announcement](https://openai.com/index/introducing-the-agents-api/?utm_source=chatgpt.com)
+
+---
+
+# Claude has moved in the same direction
+
+Anthropic now has **Claude Managed Agents**, which they explicitly describe as being intended for long-running and asynchronous work. Anthropic provides the harness, sandbox, state management and autonomous tool execution rather than requiring you to implement the entire loop. ([Claude Platform][6])
+
+Claude's tooling also includes server-side context management. Long agent runs can automatically compact old history, while tool-result editing removes information that is no longer useful. ([Claude Platform][7])
+
+So you could realistically make the CNS **model-independent**:
+
+```text
+                         ┌── Codex Agent
+                         │
+Goal → CNS Router ───────┼── Claude Agent
+                         │
+                         ├── Local Nemotron
+                         │
+                         ├── Gemini
+                         │
+                         └── specialized worker
+```
+
+And that leads to another NVIDIA project that I think is unusually relevant to you.
+
+---
+
+# NeMo Switchyard looks almost made for your multi-LLM idea
+
+NVIDIA released **NeMo Switchyard** specifically to route different portions of an agent workflow to different models.
+
+It can recognize stages of a coding-agent run and decide:
+
+```text
+hard planning         → frontier model
+architecture decision → frontier model
+routine edit          → local/cheap model
+file reading          → local/cheap model
+tests                 → local/cheap model
+error recovery        → frontier model
+hard reasoning        → frontier model
+```
+
+Its stage router explicitly uses signals such as planning, file observation, mutation, shell activity and test results. ([GitHub][8])
+
+That is remarkably close to the brain analogy we've discussed before.
+
+You don't want the equivalent of your prefrontal cortex calculating:
+
+```text
+2 + 2
+```
+
+You want the expensive reasoning system activated when there is **uncertainty, novelty, contradiction or failure**.
+
+Switchyard supports a strong/weak model architecture and can preserve routing state across the agent session. ([NVIDIA Developer][9])
+
+This would let you build:
+
+```text
+                     CNS
+                      │
+               Task Difficulty
+                      │
+          ┌───────────┴────────────┐
+          │                        │
+       routine                   difficult
+          │                        │
+  local 30B model          GPT / Claude / Gemini
+          │                        │
+          └───────────┬────────────┘
+                      ↓
+                  Results
+```
+
+That could cut your API usage dramatically while leaving the expensive models available for the decisions that matter.
+
+---
+
+# You also need durable execution
+
+This is different from memory.
+
+Suppose your agent has been working for 11 hours and:
+
+```text
+Windows reboots
+network fails
+API rate limits
+Python crashes
+LLM provider times out
+process gets killed
+```
+
+Memory doesn't solve that.
+
+You need **durable execution**.
+
+Two good choices are Temporal and LangGraph.
+
+LangGraph saves graph state as checkpoints and lets a workflow resume from those checkpoints. It also gives you time-travel debugging and human intervention. ([Docs by LangChain][10])
+
+Temporal goes even further toward distributed-systems durability. I would favor it if your goal eventually becomes something like:
+
+> "Work on improving this trading system continuously for the next month."
+
+Temporal handles the outer workflow while an agent framework handles cognition:
+
+```text
+TEMPORAL
+
+Goal
+  ↓
+Start research agent
+  ↓
+checkpoint
+  ↓
+experiment
+  ↓
+checkpoint
+  ↓
+API dies
+  X
+
+--- machine restarts ---
+
+resume
+  ↓
+evaluation
+  ↓
+checkpoint
+  ↓
+continue
+```
+
+That's the difference between **an AI agent demo** and **an autonomous service**.
+
+Temporal itself describes this as the durable-execution layer necessary for long-running stateful AI systems. ([Temporal][11])
+
+---
+
+# Another important NVIDIA component: OpenShell
+
+Once agents operate for hours or days, giving them unrestricted shell access becomes dangerous even if the model behaves perfectly 99.9% of the time.
+
+NVIDIA's **OpenShell** places the agent inside a sandbox and controls:
+
+```text
+filesystem
+network
+processes
+credentials
+external endpoints
+```
+
+outside the agent itself.
+
+That separation is important. An agent shouldn't be responsible for deciding whether the agent is allowed to do something.
+
+OpenShell supports agents such as Claude Code, OpenCode and Codex, although NVIDIA notes that the current default policy fully covers Claude Code while Codex requires a custom policy. ([NVIDIA Docs][12])
+
+For your system I'd want something equivalent to:
+
+```text
+CNS
+ │
+ ├── Worker A ── OpenShell sandbox
+ │
+ ├── Worker B ── OpenShell sandbox
+ │
+ └── Worker C ── OpenShell sandbox
+
+Workers cannot touch:
+    personal documents
+    credentials
+    unrelated source
+    production databases
+    host operating system
+```
+
+This becomes increasingly important as autonomy increases. ([NVIDIA Docs][13])
+
+---
+
+# What AVO teaches that I would copy directly
+
+I would take **seven concepts** from this work:
+
+1. **Objective state must live outside the LLM.** Store goals, hypotheses, experiment history and results in structured storage.
+
+2. **Keep lineage.** Never merely overwrite `solution.py`. Keep `V1 → V2 → V3`, along with exactly why each version was created and what happened.
+
+3. **Build deterministic evaluation wherever possible.** The agent should not ask itself, "Did I do a good job?" If code is supposed to improve latency, measure latency. If it should pass tests, run tests.
+
+4. **Remember failures, not just successes.** `"Tried ATR trailing 1.5× — worsened DD by 23%"` may be more valuable than the successful result.
+
+5. **Separate worker and supervisor.** The worker solves the problem. A separate process periodically asks whether meaningful progress is occurring.
+
+6. **Compress context; don't accumulate context.** Important information moves into persistent state; transient shell output disappears.
+
+7. **Detect stagnation explicitly.** Five small variants of the same failed idea should cause a strategic reset, not a sixth variant.
+
+Those seven pieces are more important to me than any particular agent framework.
+
+---
+
+# And this becomes extremely interesting for your trading work
+
+AVO's original evolutionary-search formulation maps surprisingly well onto strategy discovery.
+
+Imagine that instead of:
+
+```text
+Improve this CUDA kernel.
+```
+
+the objective is:
+
+```text
+Produce a robust NQ strategy satisfying:
+
+OOS Profit Factor > X
+Max DD < $2,000
+Trades >= 80% days
+No trades after 15:00 MT
+Slippage stress passes
+Walk-forward robustness passes
+```
+
+Then you have:
+
+```text
+Strategy V37
+    ↓
+Agent proposes hypothesis
+    "Maybe volatility-normalized stop improves NY session"
+    ↓
+Generate V38
+    ↓
+Backtest
+    ↓
+Evaluator
+    ├── profit
+    ├── PF
+    ├── drawdown
+    ├── MAE/MFE
+    ├── robustness
+    ├── walk-forward
+    └── leakage checks
+    ↓
+better?
+    ├── YES → commit V38
+    └── NO  → store rejection
+                 ↓
+              memory
+                 ↓
+          next hypothesis
+```
+
+Now imagine that running continuously.
+
+That's essentially **AVO applied to strategy research**.
+
+And unlike a vague "AI trader," there is an objective feedback function. That is exactly where autonomous agents become much more powerful.
+
+---
+
+# The architecture I would use for your CNS now
+
+I would not make one gigantic autonomous LLM.
+
+I'd build this:
+
+```text
+                         ┌─────────────────┐
+                         │    CNS / CEO    │
+                         │ goal management │
+                         └────────┬────────┘
+                                  │
+                         Priority / novelty
+                                  │
+                    ┌─────────────┴────────────┐
+                    │                          │
+              Supervisor                  Memory
+          progress / stagnation      SQLite/Postgres
+                    │                 + files + Git
+                    │                          │
+                    └─────────────┬────────────┘
+                                  ↓
+                           Task Manager
+                                  │
+                         Temporal workflow
+                                  │
+                 ┌────────────────┼────────────────┐
+                 ↓                ↓                ↓
+             Research          Coding         Experiment
+              Agent             Agent            Agent
+                 │                │                │
+                 └─────── Model Router ───────────┘
+                              Switchyard
+                                  │
+                 ┌────────────────┼──────────────┐
+                 ↓                ↓              ↓
+             local LLM         Codex          Claude
+                 │                │              │
+                 └────────────────┼──────────────┘
+                                  ↓
+                             OpenShell
+                                  ↓
+                         Real environment
+                                  ↓
+                             Evaluator
+                                  ↓
+                       success / failure
+                                  ↓
+                        persistent lineage
+                                  │
+                                  └──────→ CNS
+```
+
+That is much closer to the system I think you're ultimately trying to create.
+
+---
+
+## What I would experiment with first
+
+I wouldn't start by building all of that. I'd run three controlled experiments:
+
+1. **Install NVIDIA NOOA and build one agent with external memory.** Give it a real coding optimization problem and force it to run many iterations while retaining experiment history. The project is still a `0.x` research preview, so I'd treat it as an architecture laboratory rather than immediately putting it into production. ([GitHub][2])
+
+2. **Build an AVO-style evaluator/lineage loop around one of your existing projects.** A trading strategy optimizer would actually be an excellent candidate because you already have objective backtest scoring. Don't build the CNS yet—prove that an agent can autonomously produce V1...V50 while learning from rejected experiments.
+
+3. **Then add durability and multiple brains.** Put Temporal or LangGraph outside the agent, OpenShell around execution, and Switchyard between the agent and models. Only after that would I add continuous idea generation and multiple competing agents.
+
+If that experiment works, **then** I think your continuous-brain concept becomes considerably more than an interesting architecture. It becomes an engineering system where a cheap local model can continuously notice problems and generate hypotheses, durable workers can investigate them for hours, frontier models can be summoned for difficult reasoning, evaluators determine reality, and persistent memory lets the whole organization accumulate knowledge instead of starting over each chat.
+
+That is the direction I'd pursue. The AVO result is one of the better pieces of evidence I've seen that this system-level approach is worth taking seriously. ([NVIDIA Developer][1])
+
+[1]: https://developer.nvidia.com/blog/nvidia-avo-reaches-100-on-arc-agi-3-demonstrating-a-frontier-level-general-purpose-architecture-for-long-horizon-autonomous-agents/ "NVIDIA AVO Reaches 100% on ARC-AGI-3, Demonstrating a Frontier-Level General-Purpose Architecture for Long-Horizon Autonomous Agents | NVIDIA Technical Blog"
+[2]: https://github.com/NVIDIA-NeMo/labs-OO-Agents?utm_source=chatgpt.com "GitHub - NVIDIA-NeMo/labs-OO-Agents: NVIDIA Object Oriented Agents: the Pythonic way to build AI Agents. · GitHub"
+[3]: https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/packages/nooa-memory/src/nooa_memory/README.md?utm_source=chatgpt.com "labs-OO-Agents/packages/nooa-memory/src/nooa_memory/README.md at main · NVIDIA-NeMo/labs-OO-Agents · GitHub"
+[4]: https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/README.md?utm_source=chatgpt.com "labs-OO-Agents/examples/README.md at main · NVIDIA-NeMo/labs-OO-Agents · GitHub"
+[5]: https://openai.com/index/introducing-the-agents-api/?utm_source=chatgpt.com "Introducing the Agents API | OpenAI"
+[6]: https://platform.claude.com/docs/en/managed-agents/overview?fcdaa149_sort_date=desc&s=&utm_source=chatgpt.com "Claude Managed Agents overview - Claude API Docs"
+[7]: https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner?utm_source=chatgpt.com "Tool runner (SDK) - Claude Platform Docs"
+[8]: https://github.com/NVIDIA-NeMo/Switchyard/blob/main/docs/routing_algorithms/stage_router_routing.md?utm_source=chatgpt.com "Switchyard/docs/routing_algorithms/stage_router_routing.md at main · NVIDIA-NeMo/Switchyard · GitHub"
+[9]: https://developer.nvidia.com/blog/route-ai-agent-workloads-across-models-with-nvidia-nemo-switchyard?utm_source=chatgpt.com "Route AI Agents Across Models with NVIDIA NeMo Switchyard | NVIDIA Technical Blog"
+[10]: https://docs.langchain.com/oss/python/langgraph/overview?utm_source=chatgpt.com "LangGraph overview - Docs by LangChain"
+[11]: https://temporal.io/news/temporal-raises-300M-to-make-agentic-ai-real-for-companies?utm_source=chatgpt.com "Temporal raises Series D funding | Temporal"
+[12]: https://docs.nvidia.com/openshell/home?utm_source=chatgpt.com "NVIDIA OpenShell Developer Guide | NVIDIA OpenShell"
+[13]: https://docs.nvidia.com/openshell/about/overview?utm_source=chatgpt.com "Overview of NVIDIA OpenShell | NVIDIA OpenShell"

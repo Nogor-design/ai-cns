@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   ArrowLeft, ArrowRight, BookOpen, Check, FileSearch, LoaderCircle,
-  ShieldCheck, X,
+  RotateCcw, ShieldCheck, Terminal, X,
 } from 'lucide-react'
+import { blueprintCliFallback, validateBlueprintDraft } from './blueprintLifecycle.js'
 
 function InterviewRail({ step }) {
   const active = step === 'questions' ? 1 : step === 'phase' ? 2 : 3
@@ -18,6 +19,7 @@ export default function BlueprintOnboardingModal({ project, onClose, onStart, on
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(true)
   const [error, setError] = useState('')
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const loadHandlers = useRef({ onStart, onPreview })
 
   useEffect(() => {
@@ -27,8 +29,10 @@ export default function BlueprintOnboardingModal({ project, onClose, onStart, on
   useEffect(() => {
     let cancelled = false
     async function load() {
+      setBusy(true)
+      setError('')
       try {
-        const loaded = await loadHandlers.current.onStart(project.project_id)
+        const loaded = validateBlueprintDraft(await loadHandlers.current.onStart(project.project_id))
         if (cancelled) return
         setDraft(loaded)
         setAnswers(loaded.answers || {})
@@ -42,7 +46,7 @@ export default function BlueprintOnboardingModal({ project, onClose, onStart, on
     return () => { cancelled = true }
     // Project identity is the lifecycle boundary. Request handlers stay fresh
     // through the ref without restarting discovery after portfolio refreshes.
-  }, [project.project_id])
+  }, [project.project_id, loadAttempt])
 
   function update(key, value) { setAnswers(current => ({ ...current, [key]: value })) }
   function complete(keys) { return keys.every(key => String(answers[key] || '').trim()) }
@@ -82,6 +86,11 @@ export default function BlueprintOnboardingModal({ project, onClose, onStart, on
     <div className="modal-head"><div><span className="eyebrow">Guided project design</span><h2 id="blueprint-onboarding-title">Build {project.name}'s blueprint</h2><p>Cortex asks only for intent it cannot discover from the repository.</p></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <InterviewRail step={step} />
     {busy && !draft ? <div className="blueprint-loading"><LoaderCircle className="spin" size={18} />Inspecting bounded local evidence…</div> : <>
+      {error && !draft && <div className="blueprint-load-error" role="alert">
+        <CircleError />
+        <div><strong>Blueprint interview could not open</strong><p>{error}</p><small>Local CLI fallback</small><code>{blueprintCliFallback(project.repo_path)}</code></div>
+        <button type="button" onClick={() => setLoadAttempt(attempt => attempt + 1)}><RotateCcw size={14} />Retry</button>
+      </div>}
       {draft && <div className="blueprint-discovery-note"><FileSearch size={15} /><span><strong>Local discovery complete</strong>{draft.discovery.stack || 'Stack not detected'} · {draft.discovery.bounded_characters.toLocaleString()} bounded characters · <code>{draft.discovery_hash.slice(0, 10)}</code></span></div>}
       {step === 'questions' && draft && <form className="blueprint-question-form" onSubmit={saveQuestions}>
         {draft.questions.map(question => <label key={question.key}>{question.label}<textarea rows="3" value={answers[question.key] || ''} onChange={event => update(question.key, event.target.value)} required /><small>{question.help}</small></label>)}
@@ -106,4 +115,8 @@ export default function BlueprintOnboardingModal({ project, onClose, onStart, on
       </div>}
     </>}
   </section></div>
+}
+
+function CircleError() {
+  return <span className="blueprint-load-error-icon"><Terminal size={16} /></span>
 }

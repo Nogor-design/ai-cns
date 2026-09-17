@@ -297,6 +297,8 @@ def begin_draft(
             session_id=pm_session_id,
             commit=False,
         )
+    if preview_invalidated and effective_stage == "review":
+        effective_stage = "planning"
     now = ids.now()
     if answers is not None:
         if not isinstance(answers, dict):
@@ -330,9 +332,12 @@ def begin_draft(
             planning_task_id, pm_session_id, now, now,
         ),
     )
+    lifecycle_status = (
+        "review" if effective_stage == "review" and saved_preview_json else "draft"
+    )
     conn.execute(
-        """UPDATE projects SET blueprint_status='draft', updated_at=? WHERE id=?""",
-        (now, project["id"]),
+        "UPDATE projects SET blueprint_status=?, updated_at=? WHERE id=?",
+        (lifecycle_status, now, project["id"]),
     )
     store.create_activity_event(
         conn,
@@ -1890,19 +1895,42 @@ def projection(
                 phases.append(phase)
     phase_quality = _phase_quality_summary(phases) if phases else None
     draft = conn.execute(
-        "SELECT stage, discovery_hash, updated_at FROM project_blueprint_drafts WHERE project_id=?",
+        """SELECT stage, discovery_hash, preview_json, preview_fingerprint,
+                  previewed_at, updated_at
+           FROM project_blueprint_drafts WHERE project_id=?""",
         (project["id"],),
     ).fetchone()
+    status = project["blueprint_status"]
+    if (
+        status == "draft"
+        and draft
+        and draft["stage"] == "review"
+        and draft["preview_json"]
+    ):
+        try:
+            _stored_preview(draft["preview_json"], draft["preview_fingerprint"])
+        except ValueError:
+            pass
+        else:
+            # Old dashboard builds could demote the project row while leaving
+            # the exact saved review intact. Project the durable review truth
+            # without turning this read path into a database repair mutation.
+            status = "review"
+    draft_projection = None
+    if draft:
+        draft_projection = {
+            key: draft[key] for key in draft.keys() if key != "preview_json"
+        }
     return {
-        "status": project["blueprint_status"],
+        "status": status,
         "path": project["blueprint_path"] or str(blueprint_path(project)),
         "content_hash": project["blueprint_hash"],
         "revision": revision,
         "phases": phases,
         "phase_quality": phase_quality,
         "current_phase_id": project["current_phase_id"],
-        "draft": {key: draft[key] for key in draft.keys()} if draft else None,
-        "execution_ready": project["blueprint_status"] not in {"draft", "review"},
+        "draft": draft_projection,
+        "execution_ready": status not in {"draft", "review"},
     }
 
 

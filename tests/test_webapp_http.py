@@ -379,6 +379,24 @@ def test_guided_blueprint_draft_endpoints_save_and_resume_without_provider_conta
     assert prepared["preview"]["plan_basis"]["provider_contacted"] is False
     assert prepared["preview"]["writes"]["create_tasks"] is False
 
+    # Preserve compatibility with the legacy mismatch observed in the live
+    # portfolio: a valid review draft remains authoritative for read surfaces.
+    with db.connect(isolated_db) as conn:
+        conn.execute(
+            "UPDATE projects SET blueprint_status='draft' WHERE id=?", (project_id,)
+        )
+        conn.commit()
+    _, legacy_portfolio = request_json(dashboard_server, "/api/portfolio")
+    legacy_project = next(
+        project for project in legacy_portfolio["projects"]
+        if project["project_id"] == project_id
+    )
+    assert legacy_project["blueprint"]["status"] == "review"
+    assert (
+        legacy_project["blueprint"]["draft"]["preview_fingerprint"]
+        == prepared["preview"]["preview_fingerprint"]
+    )
+
     # Every request opens a new database connection. Reloading the draft proves
     # the exact browser approval payload is durable rather than component state.
     status, resumed = request_json(
@@ -391,6 +409,16 @@ def test_guided_blueprint_draft_endpoints_save_and_resume_without_provider_conta
     assert status == 200
     assert resumed["draft"]["stage"] == "review"
     assert resumed["draft"]["preview"] == prepared["preview"]
+    _, refreshed = request_json(dashboard_server, "/api/portfolio")
+    resumed_project = next(
+        project for project in refreshed["projects"]
+        if project["project_id"] == project_id
+    )
+    assert resumed_project["blueprint"]["status"] == "review"
+    assert (
+        resumed_project["blueprint"]["draft"]["preview_fingerprint"]
+        == prepared["preview"]["preview_fingerprint"]
+    )
 
     with pytest.raises(HTTPError) as caught:
         request_json(
