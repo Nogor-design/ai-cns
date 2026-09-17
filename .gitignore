@@ -14,6 +14,8 @@ node_modules/
 .cortex/runs/
 .cortex/digests/
 .cortex/dashboard-logs/
+.cortex/logs/
+.cortex/logs-*.txt
 .cortex/reviews/
 .cortex/*-brief.md
 
