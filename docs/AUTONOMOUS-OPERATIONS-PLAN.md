@@ -152,6 +152,40 @@ the Hub's own playbook router (loaded read-only by file path) and a built-in
 pattern list. A broken or missing Hub falls back to the patterns, never to
 "allowed".
 
+### Phase 2.5 — Project understanding (owner request, 2026-09-17)
+
+Requested mid-Phase-2 and built ahead of Phase 3, because the owner cannot
+delegate work on a project he cannot quickly re-orient himself on: "I need for
+the tool to help me keep track of what is going on and where things need to go."
+
+Scope: read each repository's own README, plan, roadmap and state document and
+answer four questions with no agent and no cost — what this is, where its plan
+says it goes, what is still open, where the documents and the code disagree.
+Snapshots are content-fingerprinted so Re-evaluate reports whether anything
+moved. Separately, a term profile per project, plus the Trading Capability Hub
+registry read as data, answers "do I already have this?" before a new idea
+becomes a new repository.
+
+Non-goals: authoring or editing anyone's plan document, and any model call in
+the default path. A local Ollama paragraph is opt-in and never replaces the
+extracted facts.
+
+Exit: every registered project reads correctly from its own documents (done —
+all six read, with the current phase identified for the two that use phased
+plans), and the overlap radar surfaces the portfolio's real duplicates with no
+false positives (done — three true pairs, nothing else).
+
+Still open from the same request, deliberately deferred:
+
+- **Execute the plan as a long-horizon plan.** The survey names the work; it
+  does not yet turn it into a task chain the scheduler runs to completion. This
+  is Phase 5, and it needs the Phase 3 verification gates underneath it before
+  anything should be allowed to run unattended for hours.
+- **Ideas and web search on an idea.** The overlap radar answers "do I already
+  have this"; it does not answer "what should this become". Research turns cost
+  tokens and need the owner's framing, so this stays a deliberate action rather
+  than something the scheduler does on its own.
+
 ### Phase 3 — Verification gates and integration auto-merge
 
 Scope: write tasks run in isolated worktrees branched from `cortex/integration`;
@@ -305,3 +339,28 @@ database, dashboard alert thresholds.
 - `ollama` has no tool-call cap (`max_tool_calls=0`) because it has no tool
   loop; only its stall and wall-clock limits apply.
 
+
+## 10. Phase 2.5 findings
+
+- **Plan documents do not use checkboxes.** The reader was first written around
+  `- [ ]` items and found nothing in this repo's own controlling plan, because
+  that plan states remaining work as `Scope:` / `Exit:` prose under a phase
+  heading. Reading the first phase heading not marked done, and the labelled
+  sentences under it, is what made the feature work on real documents.
+- **Borrowing open items across documents is actively harmful.** An early
+  version presented 2019 proposal bullets as current work. Next steps now come
+  from the plan document alone, and fall back only when it says nothing.
+- **Cortex's own artifacts read back as plans.** `.cortex/runs/*/brief.md` are
+  generated run briefs; scanning `.cortex` recursively made Cortex quote its own
+  instructions to itself. It is scanned one level deep now.
+- **Stemming was not optional for overlap.** "a tool to track decisions my team
+  makes" scored 0.000 against "a decision register for small teams" without it,
+  and 0.243 with it. Plural and gerund folding alone recovered the feature.
+- **Similarity score alone is not evidence.** The portfolio's highest-scoring
+  pair was a naming coincidence on the single word "demos". Requiring two shared
+  terms removed that class of false positive and allowed the threshold to drop
+  from 0.12 (which surfaced nothing) to 0.085.
+- **Threshold and shared-term floor are owner-tunable.** `overlap.DEFAULT_MIN_SCORE`
+  and `overlap.MIN_SHARED_TERMS` are calibrated against today's six projects and
+  twenty Hub capabilities. They will need revisiting as the portfolio grows;
+  this is the same class of decision as the Phase 4 ranking weights.
