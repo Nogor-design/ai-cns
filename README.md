@@ -49,7 +49,9 @@ phase visibility, and later phase-to-task decomposition is in
     server-stored payload. The design view renders local Markdown, bundled
     strict-mode Mermaid diagrams, and plan-basis provenance without remote scripts.
 
-No dispatcher merges work automatically.
+Automatic merges go to a project's `cortex/integration` branch only, behind the
+verification gate described below, and only where the owner turned them on. No
+dispatcher pushes, and nothing merges to `main`.
 
 ## Unattended work guardrails
 
@@ -97,6 +99,34 @@ Phase 2 adds the scheduler itself:
   stopped and interrupted runs; at most 8 items surface per day by default.
 - `scripts\install-autopilot-task.ps1` previews, and with `-Install` registers, a
   logon task. Pause everything from the dashboard or `cortex capacity pause`.
+
+Phase 3 adds the verification gate, which is what makes unattended *writes*
+possible at all:
+
+- **One destination.** Agent writes happen in an isolated worktree branched
+  from the project's own `cortex/integration` branch, and merge back into that
+  branch and nowhere else. The merge runs in a private `_integration`
+  checkout, so it never disturbs what the owner has open. Nothing is ever
+  pushed and `main`/`master` is never touched.
+- **One gate, in a fixed order.** Cortex commits whatever the agent left
+  uncommitted, then checks: did it change anything; is every file inside the
+  task's allowed paths; did it touch a protected file (CI, lockfiles,
+  credentials, `CLAUDE.md`/`AGENTS.md`, agent configuration, the blueprint);
+  is there a secret in the diff; do the project's tests pass on its branch;
+  does it merge `--no-ff`; do the tests still pass **on the merged result**;
+  and does a second model - never the one that wrote it - approve it against
+  the acceptance criteria. Checks run cheapest-first and the only one that
+  spends tokens runs last.
+- **Failing after the merge is safe.** If the merged tests or the review fail,
+  the integration branch is rewound to exactly where it started.
+- **Conflicts and protected files are yours.** Both become inbox decisions with
+  the evidence attached; Cortex never resolves a conflict.
+- **Auto-merge is per project.** Only a project the owner sets to
+  `integration` autonomy mode merges automatically. Everywhere else the gate
+  still runs and records what it found, and the work waits on its branch.
+- `cortex integration status|show|verify|revert|review`, and the **Verified
+  work** band in the dashboard, which lists what the gate decided and offers
+  one button to undo a merge.
 
 
 ## Which worker may see which repository

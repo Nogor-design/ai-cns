@@ -186,7 +186,7 @@ Still open from the same request, deliberately deferred:
   tokens and need the owner's framing, so this stays a deliberate action rather
   than something the scheduler does on its own.
 
-### Phase 3 — Verification gates and integration auto-merge
+### Phase 3 — Verification gates and integration auto-merge (implemented; real tasks pending)
 
 Scope: write tasks run in isolated worktrees branched from `cortex/integration`;
 gate = task tests pass, project test command passes on the merged result, path
@@ -197,6 +197,28 @@ conflicts go to the inbox, never auto-resolved.
 
 Exit: 20 synthetic and 5 real low-risk tasks merged or rejected correctly;
 reverting any merge restores a passing integration branch.
+
+As built (`cortex/integration.py`, `cortex/verification.py`, `cortex/review.py`;
+schema v17 adds `verifications`):
+
+- The merge happens in a dedicated `_integration` worktree, never in the
+  owner's checkout, so a scheduler merge cannot disturb what the owner has
+  open. `refresh` follows the base branch only by fast-forward; divergence is
+  reported, never guessed at.
+- The gate commits whatever the agent left uncommitted on its own branch,
+  because a gate can only judge, merge and revert a commit. Agents differ in
+  whether they commit their own work; this removes the difference.
+- Checks run cheapest-first and the only one that spends tokens runs last.
+  Checks after the merge (merged tests, review) rewind the branch to exactly
+  where it started if they fail, so a rejection leaves no trace.
+- A protected-file change and a merge conflict are **owner decisions**
+  (`needs_owner`), not refusals: both go to the inbox with the evidence.
+- No second model available is a **fail**, not a skip. The requirement is
+  settable (`cortex integration review --not-required`), which makes turning it
+  off a recorded choice rather than a silent default.
+- Unattended writes are admitted only for projects in `integration` mode whose
+  route the router did not mark high-risk or approval-requiring. Everything
+  else, including every protected project, still waits for the owner.
 
 ### Phase 4 — Skill scoreboard and token efficiency
 
@@ -272,6 +294,21 @@ database, dashboard alert thresholds.
   (15 wait in `review`, 2 in progress), so an installed scheduler would idle
   until tasks are approved -- which is Phase 5's problem to solve, not a reason
   to invent work.
+
+- 2026-09-17: Phase 3 implemented on `master` (owner has delegated merges).
+  `cortex/integration.py` owns the per-project `cortex/integration` branch and
+  its private worktree; `cortex/verification.py` is the gate; `cortex/review.py`
+  is the second-model reviewer; schema v17 adds `verifications`. Verified: 356
+  Python and 42 dashboard tests pass and the dashboard builds. The synthetic
+  exit criterion is met as a test table (`tests/test_gate_scenarios.py`): 20
+  changes an agent could plausibly produce, of which 4 merge, 3 become owner
+  decisions and 13 are refused, each asserting the blocking check by name and
+  confirming against real Git state that a refusal left nothing on the branch.
+  The revert criterion is met the same way: undoing one of two merges removes
+  only that change and leaves a clean, passing branch.
+  Not yet done: the 5 real low-risk tasks. They need real agent runs on a
+  project the owner has put in `integration` mode, and the live portfolio has
+  no approved write work waiting.
 
 ## 8. Phase 1 findings and follow-ups
 
@@ -364,3 +401,20 @@ database, dashboard alert thresholds.
   and `overlap.MIN_SHARED_TERMS` are calibrated against today's six projects and
   twenty Hub capabilities. They will need revisiting as the portfolio grows;
   this is the same class of decision as the Phase 4 ranking weights.
+
+## 11. Phase 3 findings and follow-ups
+
+- A gate that can only judge committed work forced a decision about agents that
+  edit without committing. Committing for them, on their own branch, is the
+  only option that keeps the gate honest without trusting the agent to tidy up.
+- `worktrees.ensure` refused every write run on a project whose `.cortex/`
+  files are untracked, which is the normal state after `cortex init`. Only the
+  owner's own uncommitted work blocks a run now.
+- Ordering the checks is a cost decision, not a taste one: path scope and
+  protected files are free, tests are cheap, the second model is not. The merge
+  sits between them because a conflict makes a review pointless.
+- Open: the integration branch is never merged onward. Phase 5 or the owner
+  decides when `cortex/integration` reaches `main`, and nothing here pushes.
+- Open: `refresh` reports `diverged` and stops. A project whose base branch
+  moves while Cortex work sits unmerged will keep testing against older code
+  until the owner merges the integration branch or rebases it by hand.
