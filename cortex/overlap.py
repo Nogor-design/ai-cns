@@ -305,6 +305,7 @@ class Corpus:
         exclude: str | None = None,
         limit: int = 5,
         min_score: float = 0.0,
+        min_shared: int = 1,
     ) -> list[Match]:
         query = self._vector(terms)
         found: list[Match] = []
@@ -312,7 +313,7 @@ class Corpus:
             if entry.key == exclude:
                 continue
             score, shared = self._score(query, self._vector(entry.terms))
-            if score < min_score:
+            if score < min_score or len(shared) < min_shared:
                 continue
             found.append(Match(
                 key=entry.key, label=entry.label, source=entry.source,
@@ -327,12 +328,19 @@ class Corpus:
 # --------------------------------------------------------------------------
 # the two questions worth asking
 
-# How close two things must be before Cortex says anything. Cosine over TF-IDF
-# is scale-free but not intuitive: on this portfolio, unrelated projects land
-# under 0.05, a shared domain lands around 0.12, and a genuine duplicate lands
-# above 0.25. The default is deliberately cautious — a false "you already built
-# this" is more annoying than a missed hint, because the owner acts on it.
-DEFAULT_MIN_SCORE = 0.12
+# How close two things must be before Cortex says anything.
+#
+# Calibrated against the real portfolio rather than guessed. Cosine over TF-IDF
+# is scale-free but not intuitive: unrelated projects land under 0.05, a shared
+# domain around 0.09-0.11, and a restatement of an existing project above 0.2.
+#
+# Score alone is not enough. The highest-scoring pair in the portfolio was
+# seagate-demo against "Imported trading-agent demos" at 0.118, on the single
+# shared word "demos" — a coincidence of naming, not of purpose. Every genuine
+# match shared at least two terms. So a match must clear both bars: one shared
+# word is a coincidence, two is a subject.
+DEFAULT_MIN_SCORE = 0.085
+MIN_SHARED_TERMS = 2
 
 
 def search(
@@ -348,7 +356,9 @@ def search(
     terms, surfaces = _weigh({"name": text, "text": text})
     # The query's own spellings win for display: it is the owner's wording.
     corpus.surfaces.update(surfaces)
-    matches = corpus.matches_for(terms, limit=limit, min_score=min_score)
+    matches = corpus.matches_for(
+        terms, limit=limit, min_score=min_score, min_shared=MIN_SHARED_TERMS
+    )
     return {
         "query": text,
         "considered": len(corpus.entries),
@@ -374,7 +384,8 @@ def neighbours(
     return [
         match.to_dict()
         for match in corpus.matches_for(
-            entry.terms, exclude=key, limit=limit, min_score=min_score
+            entry.terms, exclude=key, limit=limit, min_score=min_score,
+            min_shared=MIN_SHARED_TERMS,
         )
     ]
 
@@ -399,7 +410,8 @@ def all_neighbours(
         found[entry.project_id] = [
             match.to_dict()
             for match in corpus.matches_for(
-                entry.terms, exclude=entry.key, limit=limit, min_score=min_score
+                entry.terms, exclude=entry.key, limit=limit, min_score=min_score,
+                min_shared=MIN_SHARED_TERMS,
             )
         ]
     return found
@@ -418,7 +430,7 @@ def pairs(
     for entry in corpus.entries:
         for match in corpus.matches_for(
             entry.terms, exclude=entry.key, limit=len(corpus.entries),
-            min_score=min_score,
+            min_score=min_score, min_shared=MIN_SHARED_TERMS,
         ):
             # Two Hub capabilities overlapping each other is the Hub's business,
             # not the owner's: at least one side must be a Cortex project.

@@ -125,3 +125,23 @@ def test_every_project_gets_neighbours_from_one_corpus_build(conn, portfolio):
     assert set(everyone) == set(portfolio.values())
     for project_id, matches in everyone.items():
         assert all(match["project_id"] != project_id for match in matches)
+
+
+def test_a_single_shared_word_is_a_coincidence_not_an_overlap(conn, tmp_path):
+    """The real portfolio's top-scoring pair was a naming coincidence.
+
+    seagate-demo and "Imported trading-agent demos" shared only the word
+    "demos" and scored higher than every genuine match. Requiring two shared
+    terms removes that class of false positive without losing the true ones.
+    """
+    for name, goal in (
+        ("Seagate Demo", "A bounded synthetic factory-move replanning demo"),
+        ("Kraken Demos", "Demos of on-chain trading agents and risk gates"),
+    ):
+        repo = tmp_path / name.lower().replace(" ", "-")
+        repo.mkdir()
+        store.create_project(conn, name=name, repo_path=str(repo), current_goal=goal)
+    assert overlap.pairs(conn, include_hub=False) == []
+    # The similarity is real; it is the evidence for it that is too thin.
+    loose = overlap.pairs(conn, include_hub=False, min_score=0.0)
+    assert loose == []
