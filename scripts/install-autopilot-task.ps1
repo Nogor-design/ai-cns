@@ -24,7 +24,9 @@ $wrapper = [System.IO.Path]::GetFullPath(
 )
 $logDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\.cortex\logs'))
 $powershell = (Get-Command powershell.exe).Source
-$command = "& '$wrapper' autopilot run *>> '$logDir\autopilot.log'"
+# Out-File, not *>>: PowerShell redirection writes UTF-16, which leaves the log
+# full of null bytes and unreadable in most tools.
+$command = "& '$wrapper' autopilot run *>&1 | Out-File -FilePath '$logDir\autopilot.log' -Append -Encoding utf8"
 $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$command`""
 
 Write-Output "Task name : $TaskName"
