@@ -470,16 +470,38 @@ function BlueprintDocumentModal({ payload, onClose }) {
   </section></div>
 }
 
+// Other things that already cover this ground, so the same idea does not get
+// built twice. Sources are the registered projects and the Trading Capability
+// Hub registry; matching is local term overlap, never a model call.
+function OverlapPanel({ overlaps, onOpen }) {
+  if (!overlaps?.length) return null
+  return <section className="overlap-panel">
+    <div className="drawer-section-head"><label><Copy size={13} />Covers similar ground</label></div>
+    <ul>
+      {overlaps.map(match => <li key={match.key}>
+        <div>
+          {match.project_id
+            ? <button type="button" onClick={() => onOpen(match.project_id)}>{match.label}</button>
+            : <strong>{match.label}</strong>}
+          <small>{match.source === 'project' ? 'Cortex project' : 'Capability Hub'}</small>
+        </div>
+        <span>{match.shared.slice(0, 4).join(', ')}</span>
+      </li>)}
+    </ul>
+  </section>
+}
+
 function ProjectDrawer({
   project, onClose, onPlan, onTaskUpdate, onStart, onManual, onAllowlist,
   onTimeline, onCodex, onGithub, onRemove, onBlueprint, onDecompose, onEvidence,
-  onDependencies, onViewBlueprintDocument, onResurvey,
+  onDependencies, onViewBlueprintDocument, onResurvey, onOpenProject,
 }) {
   if (!project) return null
   return <aside className="drawer"><div className="drawer-head"><div><span className="project-monogram large" style={{ '--project-color': projectColor(project) }}>{project.name.slice(0, 2).toUpperCase()}</span><span><small>{project.program}</small><h2>{project.name}</h2></span></div><button className="icon-button" onClick={onClose}><X size={18} /></button></div>
     <div className="drawer-primary"><button onClick={() => onPlan(project.project_id, 'codex')}><Sparkles size={16} />Ask Codex to plan next</button><button onClick={() => onPlan(project.project_id, 'ollama')}><Cpu size={16} />Use local planner</button></div>
     <section><label>Current goal</label><p>{project.current_goal || 'No goal has been set.'}</p></section>
     <SurveyPanel survey={project.survey} onRefresh={() => onResurvey(project.project_id)} />
+    <OverlapPanel overlaps={project.overlaps} onOpen={onOpenProject} />
     <BlueprintPanel
       blueprint={project.blueprint}
       onBuild={() => onBlueprint(project.project_id)}
@@ -951,6 +973,7 @@ export default function App() {
       onEvidence={setPhaseEvidenceProjectId}
       onViewBlueprintDocument={openBlueprintDocument}
       onResurvey={resurveyProject}
+      onOpenProject={setSelectedId}
     /></div>
     {manualProject !== undefined && <ManualTaskModal projects={data.projects} initialProject={manualProject || ''} onClose={() => setManualProject(undefined)} onCreated={async () => { setManualProject(undefined); setToast('Manual task added'); await load(true) }} />}
     <RunModal run={selectedRun} onClose={() => setSelectedRun(null)} />

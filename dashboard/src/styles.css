@@ -1040,3 +1040,14 @@ footer span:last-child { margin-left: auto; }
 .survey-refresh:hover:not(:disabled) { border-color: #73c5b7; color: #eef8f5; }
 .survey-refresh:disabled { opacity: .6; cursor: progress; }
 .survey-outcome { color: #7d94a0; font-size: 9px; text-align: center; }
+
+/* Overlap radar: what already covers this ground. */
+.overlap-panel { display: grid; gap: 8px; }
+.overlap-panel ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.overlap-panel li { display: grid; gap: 2px; padding: 7px 9px; border: 1px solid #2c4553; border-radius: 7px; background: #10222d; }
+.overlap-panel li > div { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.overlap-panel li strong { color: #d6e4ea; font-size: 10px; }
+.overlap-panel li button { border: 0; background: transparent; padding: 0; color: #73c5b7; font-size: 10px; text-align: left; cursor: pointer; }
+.overlap-panel li button:hover { text-decoration: underline; }
+.overlap-panel li small { color: #7d94a0; font-size: 8px; text-transform: uppercase; letter-spacing: .5px; flex: none; }
+.overlap-panel li span { color: #91a4ae; font-size: 9px; font-family: ui-monospace, monospace; }

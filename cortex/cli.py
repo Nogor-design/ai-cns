@@ -39,6 +39,7 @@ from . import (
     policy,
     project_blueprints,
     project_registration,
+    overlap as overlap_mod,
     routing as routing_mod,
     runs as runs_mod,
     state as state_mod,
@@ -582,6 +583,72 @@ def next_action(
 ):
     """Alias for `cortex focus`: show the next useful action without planning."""
     focus(project)
+
+
+@app.command("overlap")
+def overlap_command(
+    idea: str = typer.Argument(
+        None, help="Describe an idea to check it against everything you already have."
+    ),
+    project: str = typer.Option(None, "--project", help="Show what overlaps this project."),
+    min_score: float = typer.Option(
+        overlap_mod.DEFAULT_MIN_SCORE, "--min", help="Similarity floor (0-1)."
+    ),
+    no_hub: bool = typer.Option(False, "--no-hub", help="Ignore the Trading Capability Hub."),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """Check an idea, or a project, against everything already built."""
+    conn = _conn()
+    include_hub = not no_hub
+    if project:
+        try:
+            row = store.get_project(conn, project)
+        except store.NotFound as exc:
+            _err(str(exc))
+        matches = overlap_mod.neighbours(
+            conn, row["id"], min_score=min_score, include_hub=include_hub
+        )
+        heading = f"Overlapping {row['name']}"
+    elif idea:
+        result = overlap_mod.search(
+            conn, idea, min_score=min_score, include_hub=include_hub
+        )
+        matches = result["matches"]
+        heading = f"Checked \"{idea}\" against {result['considered']} known capabilities"
+    else:
+        found = overlap_mod.pairs(conn, min_score=min_score, include_hub=include_hub)
+        if as_json:
+            typer.echo(json.dumps(found, indent=2))
+            return
+        if not found:
+            typer.secho("No two projects overlap above the threshold.", fg=typer.colors.GREEN)
+            return
+        typer.secho("Projects covering the same ground", fg=typer.colors.CYAN, bold=True)
+        for item in found:
+            typer.echo(
+                f"  {item['score']:.2f}  {item['left']['label']} <-> {item['right']['label']}"
+            )
+            typer.echo(f"        shared: {', '.join(item['shared'][:5])}")
+        return
+    if as_json:
+        typer.echo(json.dumps(matches, indent=2))
+        return
+    typer.secho(heading, fg=typer.colors.CYAN, bold=True)
+    if not matches:
+        typer.secho(
+            "  Nothing close enough to be worth reusing. This looks new.",
+            fg=typer.colors.GREEN,
+        )
+        return
+    for match in matches:
+        origin = "Cortex project" if match["source"] == "project" else "Capability Hub"
+        typer.echo("")
+        typer.echo(f"  {match['score']:.2f}  {match['label']}  ({origin})")
+        if match.get("path"):
+            typer.echo(f"        {match['path']}")
+        typer.echo(f"        shared: {', '.join(match['shared'][:5])}")
+        if match.get("detail"):
+            typer.echo(f"        {match['detail'][:160]}")
 
 
 @app.command("survey")

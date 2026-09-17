@@ -23,7 +23,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
-    autonomy, autopilot, capacity, inbox, lanes, model_catalog, supervisor,
+    autonomy, autopilot, capacity, inbox, lanes, model_catalog, overlap, supervisor,
     survey as survey_mod,
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
     project_blueprints, project_registration, project_removal,
@@ -380,6 +380,8 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         suggestion_payloads.append(item)
         project_suggestion_index[suggestion["project_id"]].append(item)
 
+    # One corpus for the whole portfolio; see overlap.all_neighbours.
+    neighbours = overlap.all_neighbours(conn)
     project_payloads: list[dict[str, Any]] = []
     for project in project_rows:
         snapshot = health_rows[project["id"]]
@@ -400,6 +402,7 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             allowlist_configured=policy.is_configured(project),
             blueprint=blueprint,
             survey=_survey_summary(conn, project["id"]),
+            overlaps=neighbours.get(project["id"], []),
         )
         item["git_check"] = git_checks.get(project["id"])
         if item["git_check"]:
@@ -847,6 +850,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "repo_path": selected_path,
                     },
                 )
+                return
+            if path == "/api/overlap/search":
+                if not self._allow_local_action():
+                    return
+                text = str(body.get("text") or "").strip()
+                if not text:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "describe the idea to check it against the portfolio"},
+                    )
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    self._json(HTTPStatus.OK, overlap.search(conn, text))
                 return
             if path == "/api/projects/preview":
                 if not self._allow_local_action():
