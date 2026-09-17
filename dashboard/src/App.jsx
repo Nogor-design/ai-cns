@@ -18,6 +18,7 @@ import PhaseDecompositionModal from './PhaseDecompositionModal.jsx'
 import PhaseDependencyModal from './PhaseDependencyModal.jsx'
 import PhaseEvidenceModal from './PhaseEvidenceModal.jsx'
 import CapacityPanel from './CapacityPanel.jsx'
+import IntegrationPanel from './IntegrationPanel.jsx'
 
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
@@ -946,6 +947,7 @@ export default function App() {
           <div className="summary-line"><span><strong>{data.summary.needs_decision}</strong> need you</span><span><strong>{data.summary.working}</strong> assigned / working</span><span><strong>{data.summary.recommendations}</strong> ready to approve</span><span><strong>{data.summary.active_projects}</strong> active projects</span><em>Plans are cached to conserve tokens</em></div>
           <TeamPanel team={data.team || []} onKeepWorking={keepTeamWorking} busy={Boolean(job) || serverRunningJobs.length > 0} />
           <CapacityPanel token={data.action_token} onError={setError} />
+          <IntegrationPanel token={data.action_token} onError={setError} />
           <DecisionLane tasks={decisions} projects={projectMap} onSelect={selectProject} onViewRun={setSelectedRun} />
           <WorkingLane tasks={working} projects={projectMap} onStart={startTask} onSelect={selectProject} />
           <RunActivity runs={visibleRuns} onView={setSelectedRun} />
@@ -953,7 +955,7 @@ export default function App() {
           <HealthPanel data={data} onGitRefresh={refreshGit} busy={job?.label === 'Checking GitHub' || serverRunningJobs.some(item => item.kind === 'git')} />
           <ProjectsTable projects={filteredProjects} selectedId={projectContextId} onSelect={selectProject} onPlan={id => planProject(id)} />
         </>}
-        <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges; unattended work stays read-only above your quota reserve</span></footer>
+        <footer><span>SQLite source of truth</span><span>{data.database}</span><span>Verified work merges only into cortex/integration; nothing is ever pushed</span></footer>
       </div>
     </main><ProjectDrawer
       project={selected}

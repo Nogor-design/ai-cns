@@ -1051,3 +1051,37 @@ footer span:last-child { margin-left: auto; }
 .overlap-panel li button:hover { text-decoration: underline; }
 .overlap-panel li small { color: #7d94a0; font-size: 8px; text-transform: uppercase; letter-spacing: .5px; flex: none; }
 .overlap-panel li span { color: #91a4ae; font-size: 9px; font-family: ui-monospace, monospace; }
+
+/* Verified work: the Phase 3 gate and the integration branch */
+.integration-body { padding: 15px 19px 17px; display: grid; gap: 11px; }
+.integration-reviewer { color: #728087; font-size: 10px; }
+.integration-empty { padding: 12px; border: 1px dashed #d4dad8; border-radius: 8px; color: #77858c; font-size: 11px; line-height: 1.5; }
+.integration-branches { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+.integration-branches li { display: flex; align-items: baseline; gap: 9px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.integration-branches strong { font-size: 11px; color: #2c3c44; }
+.integration-branches span { color: #728087; font-size: 10px; }
+.gate-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.gate-row { padding: 9px 11px; border: 1px solid var(--line); border-left-width: 3px; border-radius: 8px; background: white; display: grid; gap: 5px; }
+.gate-row.gate-ok { border-left-color: var(--teal); }
+.gate-row.gate-ready { border-left-color: #3f74a2; }
+.gate-row.gate-ask { border-left-color: var(--amber); }
+.gate-row.gate-refused { border-left-color: var(--coral); }
+.gate-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 0; border: 0; background: none; text-align: left; color: #2c3c44; }
+.gate-status { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.gate-ok .gate-status { color: var(--teal); }
+.gate-ready .gate-status { color: #3f74a2; }
+.gate-ask .gate-status { color: #9a6b1d; }
+.gate-refused .gate-status { color: var(--coral); }
+.gate-task { font-size: 11px; font-weight: 600; flex: 1; }
+.gate-project, .gate-when { color: #8c979b; font-size: 9px; }
+.gate-summary { color: #58666e; font-size: 10px; line-height: 1.45; }
+.gate-checks { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; }
+.gate-checks li { display: grid; grid-template-columns: 200px 1fr; gap: 8px; padding: 3px 6px; border-radius: 5px; background: #f4f6f4; font-size: 9px; color: #4a5a63; }
+.gate-checks li em { font-style: normal; color: #77858c; overflow-wrap: anywhere; }
+.gate-checks li.check-pass { background: var(--teal-soft); color: #14675c; }
+.gate-checks li.check-fail { background: #f8e5e0; color: #8f3f30; }
+.gate-checks li.check-owner { background: var(--amber-soft); color: #8a6120; }
+.gate-reverted { display: block; margin-top: 5px; color: #8c979b; font-size: 9px; }
+.gate-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.gate-actions small { color: #8c979b; font-size: 9px; }
+.gate-actions button { display: flex; align-items: center; gap: 5px; border: 1px solid #d4dad8; border-radius: 7px; background: white; color: #58666e; padding: 4px 9px; font-size: 9px; font-weight: 700; }
