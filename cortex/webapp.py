@@ -23,12 +23,14 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
+    autonomy, capacity, lanes,
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
     project_blueprints, project_registration, project_removal,
     github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
 )
 
-WORKER_NAMES = ("codex", "claude", "gemini", "grok", "ollama", "perplexity")
+WORKER_NAMES = policy.ALL_WORKERS
+QUOTA_PROVIDERS = (*capacity.METERED, *capacity.COUNTED)
 ACTIVE_TASK_STATUSES = {"open", "assigned", "in_progress", "running", "review", "blocked"}
 ROADMAP_TASK_FIELDS = (
     "id", "project_id", "project_name", "project_program", "project_status",
@@ -48,7 +50,7 @@ TASK_MUTABLE_FIELDS = {
 PROJECT_MUTABLE_FIELDS = {
     "status", "program", "priority", "privacy", "state_mode", "current_goal",
     "test_command", "allowed_workers", "remote_url", "github_owner", "github_repo",
-    "codex_project_id",
+    "codex_project_id", "autonomy_mode",
 }
 
 
@@ -544,6 +546,15 @@ def portfolio_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def capacity_payload(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Quota, local compute and autonomy state for the capacity panel."""
+    return {
+        "quota": capacity.payload(conn, QUOTA_PROVIDERS),
+        "lanes": lanes.payload(conn),
+        "autonomy": autonomy.summary(conn, store.list_projects(conn)),
+    }
+
+
 def _now_iso() -> str:
     from .ids import now
 
@@ -718,6 +729,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             self._json(HTTPStatus.OK, {"ok": True, "database": str(self.server.database_path)})
+            return
+        if path == "/api/capacity":
+            with db.connect(self.server.database_path) as conn:
+                self._json(HTTPStatus.OK, capacity_payload(conn))
             return
         if path == "/api/jobs":
             self._json(HTTPStatus.OK, {"jobs": self.server.list_jobs()})
@@ -1031,19 +1046,49 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 job_id = self._start_git_job(fetch=bool(body.get("fetch", False)))
                 self._json(HTTPStatus.ACCEPTED, {"job_id": job_id})
                 return
-            if path == "/api/team/keep-working":
-                limit = int(body.get("limit", 3))
+            if path == "/api/capacity/settings":
+                if not self._allow_local_action():
+                    return
                 with db.connect(self.server.database_path) as conn:
-                    task_ids = team.safe_start_candidates(conn, limit=limit)
+                    if "reserve_pct" in body:
+                        capacity.set_reserve_pct(conn, float(body["reserve_pct"]))
+                    if "paused" in body:
+                        autonomy.set_paused(conn, bool(body["paused"]))
+                    self._json(HTTPStatus.OK, capacity_payload(conn))
+                return
+            if path == "/api/capacity/refresh":
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    stored = capacity.refresh(conn, probe_stale=bool(body.get("probe", True)))
+                    payload = capacity_payload(conn)
+                payload["stored_readings"] = stored
+                self._json(HTTPStatus.OK, payload)
+                return
+            if path == "/api/team/keep-working":
+                # Unattended starts can spend subscription quota.
+                if not self._allow_local_action():
+                    return
+                limit = int(body.get("limit", 3))
+                skipped: dict[str, str] = {}
+                with db.connect(self.server.database_path) as conn:
+                    capacity.refresh(conn, probe_stale=True)
+                    task_ids = team.safe_start_candidates(
+                        conn, limit=limit, skipped=skipped
+                    )
                 job_ids = [
                     self._start_dispatch_job(
-                        task_id, allow_write=False, approve_high_risk=False
+                        task_id, allow_write=False, approve_high_risk=False,
+                        started_by=dispatcher.SCHEDULER,
                     )
                     for task_id in task_ids
                 ]
                 self._json(
                     HTTPStatus.ACCEPTED,
-                    {"started": len(job_ids), "task_ids": task_ids, "job_ids": job_ids},
+                    {
+                        "started": len(job_ids), "task_ids": task_ids,
+                        "job_ids": job_ids, "skipped": skipped,
+                    },
                 )
                 return
             if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "plan":
@@ -1221,8 +1266,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     )
                     payload = {"task": _row_dict(store.get_task(conn, item_id))}
                 elif kind == "projects":
-                    store.get_project(conn, item_id)
+                    current = store.get_project(conn, item_id)
                     fields = {key: value for key, value in body.items() if key in PROJECT_MUTABLE_FIELDS}
+                    if "autonomy_mode" in fields:
+                        fields["autonomy_mode"] = autonomy.validate_mode_change(
+                            current, fields["autonomy_mode"]
+                        )
                     store.update_project(conn, item_id, **fields)
                     payload = {"project": _row_dict(store.get_project(conn, item_id))}
                 elif kind == "suggestions":
@@ -1258,7 +1307,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
 
     def _start_dispatch_job(
-        self, task_id: str, *, allow_write: bool, approve_high_risk: bool
+        self, task_id: str, *, allow_write: bool, approve_high_risk: bool,
+        started_by: str = "owner",
     ) -> str:
         database_path = self.server.database_path
 
@@ -1271,6 +1321,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     conn, task, allow_write=allow_write,
                     approve_high_risk=approve_high_risk,
                     on_run_start=lambda run_id: jobs.attach_run(conn, job_id, run_id),
+                    started_by=started_by,
                 )
                 payload = asdict(result)
                 payload["workspace"] = str(payload["workspace"])

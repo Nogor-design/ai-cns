@@ -21,7 +21,7 @@ from pathlib import Path
 from . import config
 
 # Bump when SCHEMA or _ADDITIVE_COLUMNS change so existing databases re-run setup.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # Long enough to outlast the write bursts at the start and end of a dispatch,
 # short enough that a genuine deadlock still surfaces as an error.
@@ -334,9 +334,49 @@ CREATE TABLE IF NOT EXISTS phase_criterion_evidence (
     UNIQUE(phase_id, exit_criterion_ref, preview_fingerprint)
 );
 
+-- Owner-adjustable runtime settings (quota reserve, autonomy pause, ...).
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Provider quota readings. Append-only: the newest row per provider/window is
+-- the current reading; older rows are the history behind any decision.
+CREATE TABLE IF NOT EXISTS quota_snapshots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider     TEXT NOT NULL,               -- codex | claude | grok | ...
+    window       TEXT NOT NULL,               -- five_hour | seven_day | weekly | ...
+    window_minutes INTEGER,
+    used_percent REAL,                        -- 0..100, NULL when unknown
+    resets_at    TEXT,                        -- ISO UTC
+    limited      INTEGER NOT NULL DEFAULT 0,  -- 1 when the provider refused work
+    source       TEXT NOT NULL,               -- codex-session | run-output | ...
+    source_ref   TEXT,
+    observed_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS local_benchmarks (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    model              TEXT NOT NULL,
+    lane               TEXT,
+    prompt_tokens      INTEGER,
+    output_tokens      INTEGER,
+    prompt_tps         REAL,
+    output_tps         REAL,
+    load_seconds       REAL,
+    total_seconds      REAL,
+    gpu_percent        INTEGER,
+    ninjatrader_running INTEGER,
+    error              TEXT,
+    measured_at        TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
+CREATE INDEX IF NOT EXISTS idx_quota_provider_time
+    ON quota_snapshots(provider, window, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id);
 CREATE INDEX IF NOT EXISTS idx_dependencies_task ON task_dependencies(task_id);
 CREATE INDEX IF NOT EXISTS idx_dependencies_upstream ON task_dependencies(depends_on_task_id);
@@ -398,6 +438,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "blueprint_status": "TEXT NOT NULL DEFAULT 'missing'",
         "current_blueprint_revision_id": "TEXT",
         "current_phase_id": "TEXT",
+        # off | read_only | integration; NULL means the default (read_only).
+        "autonomy_mode": "TEXT",
     },
     "tasks": {
         "risk": "TEXT NOT NULL DEFAULT 'auto'",
@@ -434,6 +476,8 @@ _ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
         "usage_json": "TEXT",
         "exit_code": "INTEGER",
         "effort": "TEXT",
+        # owner | scheduler: who started the run, for unattended call caps.
+        "started_by": "TEXT",
     },
     "suggestions": {
         "effort": "TEXT",

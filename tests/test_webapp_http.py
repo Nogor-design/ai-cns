@@ -1498,3 +1498,55 @@ def test_codex_preview_blocks_policy_scope_and_secrets(
         )
     assert caught.value.code == 400
     assert expected in caught.value.read().decode("utf-8")
+
+
+def test_capacity_settings_require_token_and_protect_projects(
+    dashboard_server, isolated_db, tmp_path, monkeypatch
+):
+    from cortex import autonomy, capacity, lanes
+
+    monkeypatch.setattr(lanes, "payload", lambda conn: {"models": [], "loaded": []})
+    monkeypatch.setattr(capacity, "refresh", lambda conn, probe_stale=False: 0)
+    repo = tmp_path / "apollo-http"
+    repo.mkdir()
+    with db.connect(isolated_db) as conn:
+        apollo_id = store.create_project(conn, name="apollo-ats", repo_path=str(repo))
+
+    status, payload = request_json(dashboard_server, "/api/capacity")
+    assert status == 200
+    assert payload["quota"]["reserve_pct"] == 30.0
+    row = next(p for p in payload["autonomy"]["projects"] if p["project_id"] == apollo_id)
+    assert row["mode"] == "off" and row["protected"] == "apollo"
+
+    with pytest.raises(HTTPError) as denied:
+        request_json(dashboard_server, "/api/capacity/settings", method="POST",
+                     body={"reserve_pct": 10})
+    assert denied.value.code == 403
+    with pytest.raises(HTTPError) as unattended:
+        request_json(dashboard_server, "/api/team/keep-working", method="POST",
+                     body={"limit": 1})
+    assert unattended.value.code == 403
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+    status, payload = request_json(
+        dashboard_server, "/api/capacity/settings", method="POST",
+        body={"reserve_pct": 45, "paused": True}, headers=headers,
+    )
+    assert status == 200
+    assert payload["quota"]["reserve_pct"] == 45.0
+    assert payload["autonomy"]["paused"] is True
+
+    status, started = request_json(
+        dashboard_server, "/api/team/keep-working", method="POST",
+        body={"limit": 1}, headers=headers,
+    )
+    assert status == 202 and started["started"] == 0
+    assert "paused" in started["skipped"]["*"]
+
+    with pytest.raises(HTTPError) as protected:
+        request_json(dashboard_server, f"/api/projects/{apollo_id}", method="PATCH",
+                     body={"autonomy_mode": "read_only"})
+    assert protected.value.code == 400
+    with db.connect(isolated_db) as conn:
+        assert autonomy.mode(store.get_project(conn, apollo_id)) == "off"

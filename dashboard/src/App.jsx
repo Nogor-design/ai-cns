@@ -15,10 +15,12 @@ import BlueprintOnboardingModal from './BlueprintOnboardingModal.jsx'
 import PhaseDecompositionModal from './PhaseDecompositionModal.jsx'
 import PhaseDependencyModal from './PhaseDependencyModal.jsx'
 import PhaseEvidenceModal from './PhaseEvidenceModal.jsx'
+import CapacityPanel from './CapacityPanel.jsx'
 
 const workers = {
   codex: { label: 'Codex', tone: 'emerald' }, claude: { label: 'Claude', tone: 'orange' },
-  gemini: { label: 'Gemini', tone: 'blue' }, grok: { label: 'Grok', tone: 'ink' },
+  gemini: { label: 'Gemini', tone: 'blue' }, agy: { label: 'Antigravity', tone: 'blue' },
+  grok: { label: 'Grok', tone: 'ink' }, opencode: { label: 'opencode', tone: 'violet' },
   ollama: { label: 'Ollama', tone: 'violet' }, perplexity: { label: 'Perplexity', tone: 'cyan' },
   owner: { label: 'Owner', tone: 'slate' }, deterministic: { label: 'No-token plan', tone: 'slate' },
 }
@@ -209,6 +211,7 @@ function TeamPanel({ team, onKeepWorking, busy }) {
         <div className="expert-head"><WorkerBadge name={member.name} /><span className={`expert-state ${member.state}`}><i />{pretty(member.state)}</span></div>
         <h3>{member.role}</h3><p>{member.best_for}</p>
         {member.current_task ? <div className="expert-assignment"><small>{member.state === 'working' ? 'Working on' : 'Next assignment'}</small><strong>{member.current_task.title}</strong><span>{member.current_task.execution_model || 'default'} · {member.current_task.execution_effort || 'auto'} effort</span></div> : <div className="expert-assignment idle"><small>Available</small><strong>{member.availability === 'ready' ? 'Ready for a suitable task' : member.probe_note || 'Setup required'}</strong></div>}
+        {member.quota_allowed === false && <p className="expert-quota">Held: {member.quota_reason}</p>}
         <div className="expert-score"><span><strong>{member.success_rate == null ? '—' : `${member.success_rate}%`}</strong><small>run success</small></span><span><strong>{member.attempts}</strong><small>attempts</small></span><span><strong>{numberLabel(member.tokens)}</strong><small>tokens tracked</small></span></div>
       </article>)}
     </div>
@@ -825,7 +828,15 @@ export default function App() {
   }
   async function updateAllowlist(projectId, allowed) { try { await request(`/api/projects/${projectId}`, { method: 'PATCH', body: JSON.stringify({ allowed_workers: allowed }) }); setToast(`Allowlist updated: ${allowed.join(', ')}`); await load(true) } catch (err) { setError(err.message) } }
   async function dismissSuggestion(id) { try { await request(`/api/suggestions/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'dismissed' }) }); setToast('Suggestion dismissed'); await load(true) } catch (err) { setError(err.message) } }
-  async function keepTeamWorking() { try { const payload = await request('/api/team/keep-working', { method: 'POST', body: JSON.stringify({ limit: 3 }) }); if (!payload.job_ids.length) { setToast('No safe approved assignments are waiting; ask the PM to plan a project'); await load(true); return } watchJob(payload.job_ids[0], 'Starting team') } catch (err) { setError(err.message) } }
+  async function keepTeamWorking() {
+    try {
+      const payload = await request('/api/team/keep-working', { method: 'POST', body: JSON.stringify({ limit: 3 }), headers: { 'X-Cortex-Action-Token': data.action_token } })
+      const held = Object.values(payload.skipped || {})
+      if (!payload.job_ids.length) { setToast(held.length ? `Nothing started: ${held[0]}` : 'No safe approved assignments are waiting; ask the PM to plan a project'); await load(true); return }
+      if (held.length) setToast(`${payload.started} started; ${held.length} held by guardrails`)
+      watchJob(payload.job_ids[0], 'Starting team')
+    } catch (err) { setError(err.message) }
+  }
   async function refreshGit() { try { const payload = await request('/api/git/refresh', { method: 'POST', body: JSON.stringify({ fetch: true }) }); watchJob(payload.job_id, 'Checking GitHub') } catch (err) { setError(err.message) } }
   async function previewCodex(task) {
     setCodexLaunch({ task, loading: true, payload: null })
@@ -895,6 +906,7 @@ export default function App() {
           <Hero planner={planner} setPlanner={setPlanner} onContinue={continueWork} busy={Boolean(job) || serverRunningJobs.length > 0} onManual={() => setManualProject(null)} />
           <div className="summary-line"><span><strong>{data.summary.needs_decision}</strong> need you</span><span><strong>{data.summary.working}</strong> assigned / working</span><span><strong>{data.summary.recommendations}</strong> ready to approve</span><span><strong>{data.summary.active_projects}</strong> active projects</span><em>Plans are cached to conserve tokens</em></div>
           <TeamPanel team={data.team || []} onKeepWorking={keepTeamWorking} busy={Boolean(job) || serverRunningJobs.length > 0} />
+          <CapacityPanel token={data.action_token} onError={setError} />
           <DecisionLane tasks={decisions} projects={projectMap} onSelect={selectProject} onViewRun={setSelectedRun} />
           <WorkingLane tasks={working} projects={projectMap} onStart={startTask} onSelect={selectProject} />
           <RunActivity runs={visibleRuns} onView={setSelectedRun} />
@@ -902,7 +914,7 @@ export default function App() {
           <HealthPanel data={data} onGitRefresh={refreshGit} busy={job?.label === 'Checking GitHub' || serverRunningJobs.some(item => item.kind === 'git')} />
           <ProjectsTable projects={filteredProjects} selectedId={projectContextId} onSelect={selectProject} onPlan={id => planProject(id)} />
         </>}
-        <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges or external actions</span></footer>
+        <footer><span>SQLite source of truth</span><span>{data.database}</span><span>No automatic merges; unattended work stays read-only above your quota reserve</span></footer>
       </div>
     </main><ProjectDrawer
       project={selected}

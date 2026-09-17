@@ -18,7 +18,9 @@ DEFAULT_MODELS: dict[str, str] = {
     "codex": "default",
     "claude": "sonnet",
     "gemini": "default",
+    "agy": "default",
     "grok": "default",
+    "opencode": "qwen3-coder:30b",
     "ollama": "phi4:14b",
     "perplexity": "search",
 }
