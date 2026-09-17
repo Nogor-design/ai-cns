@@ -7,7 +7,9 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
-from . import autonomy, capacity, dispatcher, policy, routing, store, workers
+from . import (
+    autonomy, capacity, dispatcher, policy, routing, store, verification, workers,
+)
 
 
 EXPERTS: dict[str, dict[str, Any]] = {
@@ -158,10 +160,14 @@ def safe_start_candidates(
         if row["status"] != "assigned" or project["status"] != "active":
             continue
         route = routing.effective_route(project, row)
-        # Only writes are withheld from an unattended start; they need an
-        # explicit allow_write and an isolated worktree. Read-only work is
-        # gated purely by whether this project permits this worker.
-        if route.action == "implement" or route.blocked_reason:
+        if route.blocked_reason:
+            continue
+        # Unattended writes became possible in Phase 3, but only where the
+        # owner put the project in 'integration' mode and only for work whose
+        # risk the router did not raise: everything else still waits for the
+        # owner to press the button. autonomy.unattended_refusal below repeats
+        # the mode check at dispatch time, when it is authoritative.
+        if route.action == "implement" and not _write_admissible(project, route):
             continue
         if not policy.is_allowed(project, route.worker):
             continue
@@ -184,6 +190,15 @@ def safe_start_candidates(
         if len(selected) >= limit:
             break
     return selected
+
+
+def _write_admissible(project: sqlite3.Row, route: routing.Route) -> bool:
+    """Whether the scheduler may start this write route without the owner."""
+    return (
+        verification.merge_allowed(project)
+        and route.risk != "high"
+        and not route.requires_approval
+    )
 
 
 def usage_totals(runs: list[dict[str, Any]]) -> dict[str, int]:

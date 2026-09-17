@@ -1,4 +1,4 @@
-"""The unattended scheduler: keep approved read-only work moving.
+"""The unattended scheduler: keep approved work moving.
 
 One process at a time holds the ``autopilot`` lease. Each tick it:
 
@@ -13,6 +13,10 @@ One process at a time holds the ``autopilot`` lease. Each tick it:
 Starts are sequential: each waits until its run row exists, so the next
 admission check counts it. That closes the unknown-quota race Phase 1 noted.
 Pausing stops new starts; in-flight runs finish or hit their limits.
+
+Since Phase 3 this includes write work, but only on projects the owner put in
+``integration`` mode: those runs happen in an isolated worktree and their
+result is judged by the verification gate before anything merges.
 """
 
 from __future__ import annotations
@@ -183,8 +187,13 @@ class Autopilot:
             project_id=project["id"], started_by=dispatcher.SCHEDULER,
         )
         run_started = threading.Event()
+        # A write route only reaches here for a project in 'integration' mode
+        # (team.safe_start_candidates), so the scheduler supplies the same
+        # allow_write the owner would. Dispatch re-checks the mode, and the
+        # Phase 3 gate decides whether the result is kept.
+        write = route.action == "implement"
         thread = threading.Thread(
-            target=self._run, args=(job_id, task_id, route.worker, run_started),
+            target=self._run, args=(job_id, task_id, route.worker, run_started, write),
             name=f"autopilot-{job_id}",
         )
         with self._lock:
@@ -194,9 +203,13 @@ class Autopilot:
         # candidate, so capacity checks see this start.
         run_started.wait(RUN_START_WAIT)
         return {"job_id": job_id, "task_id": task_id, "worker": route.worker,
-                "project": project["name"], "title": task["title"]}
+                "project": project["name"], "title": task["title"],
+                "action": route.action}
 
-    def _run(self, job_id: str, task_id: str, worker: str, run_started: threading.Event) -> None:
+    def _run(
+        self, job_id: str, task_id: str, worker: str,
+        run_started: threading.Event, write: bool = False,
+    ) -> None:
         limits = supervisor.limits_for(worker)
         watch = supervisor.RunSupervisor(
             limits, database_path=self.database_path, job_id=job_id
@@ -215,9 +228,15 @@ class Autopilot:
             result = self._dispatch(
                 conn, task, started_by=dispatcher.SCHEDULER, on_run_start=on_start,
                 watchdog=watch, timeout=limits.max_seconds,
-                observer=watch.observe,
+                observer=watch.observe, allow_write=write,
             )
             outcome = {"exit_code": result.exit_code, "task_status": result.task_status}
+            if result.verification:
+                outcome["verification"] = {
+                    "status": result.verification["status"],
+                    "summary": result.verification["summary"],
+                    "merge_commit": result.verification["merge_commit"],
+                }
             jobs.finish(conn, job_id, status="done" if result.exit_code == 0 else "failed",
                         result=outcome, run_id=result.run_id)
             if result.exit_code != 0:
