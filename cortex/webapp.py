@@ -23,7 +23,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import (
-    autonomy, capacity, lanes,
+    autonomy, autopilot, capacity, inbox, lanes, supervisor,
     codex_app, config, db, dispatcher, git_monitor, health, ids, jobs, pm, policy,
     project_blueprints, project_registration, project_removal,
     github_adapter, github_reader, routing, runlog, secrets_scan, store, team, workers,
@@ -552,6 +552,7 @@ def capacity_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         "quota": capacity.payload(conn, QUOTA_PROVIDERS),
         "lanes": lanes.payload(conn),
         "autonomy": autonomy.summary(conn, store.list_projects(conn)),
+        "autopilot": autopilot.status(conn),
     }
 
 
@@ -594,6 +595,7 @@ class CortexDashboardServer(ThreadingHTTPServer):
         label: str | None = None,
         task_id: str | None = None,
         project_id: str | None = None,
+        started_by: str | None = None,
     ) -> str:
         """Record a job, then run it on a background thread.
 
@@ -602,7 +604,8 @@ class CortexDashboardServer(ThreadingHTTPServer):
         """
         with db.connect(self.database_path) as conn:
             job_id = jobs.create(
-                conn, kind=kind, label=label, task_id=task_id, project_id=project_id
+                conn, kind=kind, label=label, task_id=task_id, project_id=project_id,
+                started_by=started_by,
             )
 
         database_path = self.database_path
@@ -1055,6 +1058,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         capacity.set_reserve_pct(conn, float(body["reserve_pct"]))
                     if "paused" in body:
                         autonomy.set_paused(conn, bool(body["paused"]))
+                    if "max_concurrent" in body:
+                        autopilot.set_max_concurrent(conn, int(body["max_concurrent"]))
+                    if "inbox_daily_cap" in body:
+                        inbox.set_daily_cap(conn, int(body["inbox_daily_cap"]))
+                    if body.get("release_hold"):
+                        supervisor.release_worker(conn, str(body["release_hold"]))
                     if "opencode_go_monthly_usd" in body:
                         capacity.set_go_monthly_usd(conn, float(body["opencode_go_monthly_usd"]))
                         capacity.refresh(conn, force=False)
@@ -1068,6 +1077,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     payload = capacity_payload(conn)
                 payload["stored_readings"] = stored
                 self._json(HTTPStatus.OK, payload)
+                return
+            if (
+                len(parts) == 4 and parts[:2] == ["api", "inbox"]
+                and parts[3] in {"resolve", "dismiss"}
+            ):
+                if not self._allow_local_action():
+                    return
+                with db.connect(self.server.database_path) as conn:
+                    changed = inbox.resolve(
+                        conn, parts[2],
+                        status="resolved" if parts[3] == "resolve" else "dismissed",
+                        note=str(body.get("note") or "") or None,
+                    )
+                    payload = inbox.payload(conn)
+                payload["changed"] = changed
+                self._json(HTTPStatus.OK if changed else HTTPStatus.NOT_FOUND, payload)
                 return
             if path == "/api/team/keep-working":
                 # Unattended starts can spend subscription quota.
@@ -1319,14 +1344,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
         def target(job_id: str) -> dict[str, Any]:
             with db.connect(database_path) as conn:
                 task = store.get_task(conn, task_id)
-                # Publish the run id as soon as it exists so the dashboard can
-                # start tailing output while the worker is still thinking.
-                result = dispatcher.dispatch(
-                    conn, task, allow_write=allow_write,
-                    approve_high_risk=approve_high_risk,
-                    on_run_start=lambda run_id: jobs.attach_run(conn, job_id, run_id),
-                    started_by=started_by,
-                )
+                extra: dict[str, Any] = {}
+                watch: supervisor.RunSupervisor | None = None
+                if started_by == dispatcher.SCHEDULER:
+                    # Unattended starts from the dashboard get the same
+                    # supervision as the autopilot loop.
+                    project = store.get_project(conn, task["project_id"])
+                    limits = supervisor.limits_for(
+                        routing.effective_route(project, task).worker
+                    )
+                    watch = supervisor.RunSupervisor(
+                        limits, database_path=database_path, job_id=job_id
+                    )
+                    extra = {"watchdog": watch, "observer": watch.observe,
+                             "timeout": limits.max_seconds}
+                try:
+                    # Publish the run id as soon as it exists so the dashboard can
+                    # start tailing output while the worker is still thinking.
+                    result = dispatcher.dispatch(
+                        conn, task, allow_write=allow_write,
+                        approve_high_risk=approve_high_risk,
+                        on_run_start=lambda run_id: jobs.attach_run(conn, job_id, run_id),
+                        started_by=started_by,
+                        **extra,
+                    )
+                finally:
+                    if watch is not None:
+                        watch.close()
                 payload = asdict(result)
                 payload["workspace"] = str(payload["workspace"])
                 return payload
@@ -1335,7 +1379,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             project_id = store.get_task(conn, task_id)["project_id"]
         return self.server.start_job(
             "dispatch", target, label="Working", task_id=task_id,
-            project_id=project_id,
+            project_id=project_id, started_by=started_by,
         )
 
     def _start_git_job(self, *, fetch: bool) -> str:

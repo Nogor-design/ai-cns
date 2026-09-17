@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { clampReserve, resetLabel, sortModels, windowLabel, windowTone } from './capacity.js'
+import { clampReserve, resetLabel, schedulerState, sortModels, windowLabel, windowTone } from './capacity.js'
 
 test('window tone tracks the background ceiling', () => {
   assert.equal(windowTone(null, 70), 'unknown')
@@ -38,4 +38,14 @@ test('models sort usable lanes first and hide namespaced copies', () => {
   ])
   assert.deepEqual(sorted.map(model => model.name), ['tiny', 'phi4', 'coder', 'big'])
   assert.equal(windowLabel('seven_day'), 'Weekly')
+})
+
+test('scheduler state distinguishes live, paused and stopped leases', () => {
+  const now = Date.parse('2026-09-17T12:10:00Z')
+  assert.deepEqual(schedulerState(null, now), { label: 'Not started', tone: 'idle' })
+  const lease = { heartbeat_at: '2026-09-17T12:00:00Z' }
+  assert.equal(schedulerState({ lease, running: true, paused: false }, now).label, 'Running')
+  assert.equal(schedulerState({ lease, running: true, paused: true }, now).tone, 'near')
+  assert.equal(schedulerState({ lease, running: false }, now).label, 'Stopped 10m ago')
+  assert.equal(schedulerState({ lease: { heartbeat_at: 'bad' }, running: false }, now).label, 'Stopped')
 })

@@ -165,7 +165,7 @@ def safe_start_candidates(
             continue
         if not policy.is_allowed(project, route.worker):
             continue
-        refusal = dispatcher.unattended_refusal(conn, project, route)
+        refusal = dispatcher.unattended_refusal(conn, project, route, row)
         if refusal:
             skipped[row["id"]] = refusal
             continue

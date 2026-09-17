@@ -1578,3 +1578,39 @@ def test_capacity_settings_require_token_and_protect_projects(
     assert protected.value.code == 400
     with db.connect(isolated_db) as conn:
         assert autonomy.mode(store.get_project(conn, apollo_id)) == "off"
+
+
+def test_autopilot_status_and_inbox_actions(dashboard_server, isolated_db, monkeypatch):
+    from cortex import capacity, inbox, lanes, supervisor
+
+    monkeypatch.setattr(lanes, "payload", lambda conn: {"models": [], "loaded": []})
+    monkeypatch.setattr(capacity, "refresh", lambda conn, probe_stale=False, force=True: 0)
+    with db.connect(isolated_db) as conn:
+        item_id = inbox.add(conn, kind="run_failed", title="Review stalled",
+                            dedupe_key="http-test")
+        supervisor.hold_worker(conn, "agy")
+
+    status, payload = request_json(dashboard_server, "/api/capacity")
+    assert status == 200
+    pilot = payload["autopilot"]
+    assert pilot["running"] is False and pilot["max_concurrent"] == 3
+    assert pilot["inbox"]["open"] == 1 and "agy" in pilot["holds"]
+
+    with pytest.raises(HTTPError) as denied:
+        request_json(dashboard_server, f"/api/inbox/{item_id}/resolve", method="POST", body={})
+    assert denied.value.code == 403
+
+    _, portfolio = request_json(dashboard_server, "/api/portfolio")
+    headers = {"X-Cortex-Action-Token": portfolio["action_token"]}
+    status, box = request_json(dashboard_server, f"/api/inbox/{item_id}/dismiss",
+                               method="POST", body={}, headers=headers)
+    assert status == 200 and box["changed"] is True and box["open"] == 0
+
+    status, payload = request_json(
+        dashboard_server, "/api/capacity/settings", method="POST",
+        body={"max_concurrent": 2, "inbox_daily_cap": 5, "release_hold": "agy"},
+        headers=headers,
+    )
+    assert payload["autopilot"]["max_concurrent"] == 2
+    assert payload["autopilot"]["inbox"]["daily_cap"] == 5
+    assert "agy" not in payload["autopilot"]["holds"]
