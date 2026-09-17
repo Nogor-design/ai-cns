@@ -80,6 +80,23 @@ def status_summary(repo_path: str | Path) -> StatusSummary:
     )
 
 
+def dirty_paths(repo_path: str | Path) -> list[str]:
+    """Repository-relative paths with uncommitted changes, tracked or not."""
+    code, out, _ = _run(repo_path, "status", "--porcelain=v1", "--", ".")
+    if code != 0:
+        return []
+    paths = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:].strip().strip('"')
+        # Renames are reported as "old -> new"; the destination is what matters.
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        paths.append(path.replace("\\", "/"))
+    return paths
+
+
 def dashboard_snapshot(repo_path: str | Path, *, timeout: float = 2) -> RepoSnapshot:
     """Bounded Git evidence for an interactive dashboard refresh.
 

@@ -380,7 +380,12 @@ def record(conn: sqlite3.Connection, report: GateReport) -> str:
 
 def get(conn: sqlite3.Connection, verification_id: str) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT * FROM verifications WHERE id = ?", (verification_id,)
+        """SELECT v.*, t.title AS task_title, p.name AS project_name
+           FROM verifications v
+           LEFT JOIN tasks t ON t.id = v.task_id
+           LEFT JOIN projects p ON p.id = v.project_id
+           WHERE v.id = ?""",
+        (verification_id,),
     ).fetchone()
     return _row(row) if row else None
 

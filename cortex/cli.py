@@ -33,6 +33,7 @@ from . import (
     health,
     ids,
     inbox,
+    integration as integration_mod,
     lanes,
     leases,
     pm as pm_mod,
@@ -40,12 +41,15 @@ from . import (
     project_blueprints,
     project_registration,
     overlap as overlap_mod,
+    review as review_mod,
     routing as routing_mod,
     runs as runs_mod,
     state as state_mod,
     store,
+    settings as settings_mod,
     supervisor,
     survey as survey_mod,
+    verification as verification_mod,
     team,
     workers,
     webapp,
@@ -83,8 +87,13 @@ inbox_app = typer.Typer(
     help="Decisions the scheduler needs from the owner (capped per day).",
     no_args_is_help=True,
 )
+integration_app = typer.Typer(
+    help="The verification gate and each project's cortex/integration branch.",
+    no_args_is_help=True,
+)
 app.add_typer(autopilot_app, name="autopilot")
 app.add_typer(inbox_app, name="inbox")
+app.add_typer(integration_app, name="integration")
 
 
 def _configure_console_encoding() -> None:
@@ -2004,6 +2013,139 @@ def inbox_cap(value: int = typer.Argument(..., help="Items surfaced per day (1-5
     """Set how many inbox items may surface per day."""
     conn = _conn()
     typer.echo(f"Inbox daily cap: {inbox.set_daily_cap(conn, value)}")
+
+
+# ----------------------------------------------------------- integration ---
+@integration_app.command("status")
+def integration_status(
+    project: str = typer.Argument(None, help="Project id/name; omit for all active."),
+):
+    """Where each project's integration branch stands, and what the gate did."""
+    conn = _conn()
+    if project:
+        try:
+            targets = [store.get_project(conn, project)]
+        except store.NotFound as exc:
+            _err(str(exc))
+    else:
+        targets = [row for row in store.list_projects(conn) if row["status"] == "active"]
+    for row in targets:
+        info = integration_mod.status(row["repo_path"], row["id"])
+        mode = autonomy.mode(row)
+        typer.secho(f"{row['name']} ({row['id']})", bold=True)
+        typer.echo(f"  autonomy mode: {mode}"
+                   + ("" if mode == "integration" else "  [merges need the owner]"))
+        if not info.get("exists"):
+            typer.echo(f"  {integration_mod.BRANCH}: not created yet"
+                       + (f" ({info['reason']})" if info.get("reason") else ""))
+        else:
+            typer.echo(
+                f"  {integration_mod.BRANCH}: {info['ahead']} ahead / "
+                f"{info['behind']} behind {info['base']}"
+            )
+            for merge in (info.get("merges") or [])[:5]:
+                typer.echo(f"    {merge['commit'][:8]}  {merge['at'][:10]}  {merge['subject']}")
+        recent = verification_mod.recent(conn, project_id=row["id"], limit=5)
+        for item in recent:
+            typer.echo(f"  gate {item['created_at'][:16]}  {item['status']:<12} "
+                       f"{item['task_title'] or item['task_id']}")
+
+
+@integration_app.command("show")
+def integration_show(
+    verification_id: str = typer.Argument(..., help="A verification id from `integration status`."),
+):
+    """Every check the gate ran, and what it judged on."""
+    conn = _conn()
+    item = verification_mod.get(conn, verification_id)
+    if not item:
+        _err(f"no verification {verification_id}")
+    typer.secho(f"{item['status']}  {item['task_title'] or ''}", bold=True)
+    typer.echo(f"  task {item['task_id']}  run {item['run_id'] or '-'}")
+    typer.echo(f"  branch {item['task_branch'] or '-'} -> {item['integration_branch']}")
+    if item["merge_commit"]:
+        typer.echo(f"  merge commit {item['merge_commit']}")
+    for check in item["checks"]:
+        colour = {
+            verification_mod.PASS: typer.colors.GREEN,
+            verification_mod.FAIL: typer.colors.RED,
+            verification_mod.OWNER: typer.colors.YELLOW,
+        }.get(check["status"], typer.colors.WHITE)
+        typer.secho(f"  {check['status']:<8} {check['name']:<16} {check['detail']}", fg=colour)
+
+
+@integration_app.command("verify")
+def integration_verify(
+    run_id: str = typer.Argument(..., help="A finished write run to judge."),
+    merge: bool = typer.Option(
+        None, "--merge/--no-merge",
+        help="Override whether a passing change merges (default: the project's autonomy mode).",
+    ),
+):
+    """Run the gate against a write run's worktree, and merge it if it passes."""
+    conn = _conn()
+    run = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if not run:
+        _err(f"no run {run_id}")
+    if not run["workspace_path"]:
+        _err("that run has no recorded workspace; only write runs can be verified")
+    task = store.get_task(conn, run["task_id"])
+    project = store.get_project(conn, run["project_id"])
+    may_merge = verification_mod.merge_allowed(project) if merge is None else merge
+    report = verification_mod.verify(
+        conn, task, project=project, workspace=run["workspace_path"],
+        before=run["git_before"], producer=str(run["model"] or "").split(":", 1)[0],
+        run_id=run_id, unattended=False, may_merge=may_merge,
+    )
+    typer.secho(f"{report.status}: {report.summary()}",
+                fg=typer.colors.GREEN if report.merged else typer.colors.YELLOW)
+    typer.echo(f"  verification {report.verification_id}")
+
+
+@integration_app.command("revert")
+def integration_revert(
+    verification_id: str = typer.Argument(..., help="The merge to undo."),
+):
+    """Undo one merge on the integration branch, leaving the rest intact."""
+    conn = _conn()
+    item = verification_mod.get(conn, verification_id)
+    if not item:
+        _err(f"no verification {verification_id}")
+    if not item["merge_commit"]:
+        _err("that verification did not merge anything")
+    project = store.get_project(conn, item["project_id"])
+    try:
+        workspace = integration_mod.ensure(project["repo_path"], project["id"])
+        outcome = integration_mod.revert(workspace, item["merge_commit"])
+    except integration_mod.IntegrationError as exc:
+        _err(str(exc))
+    if outcome.status != "merged":
+        _err(f"revert failed: {outcome.detail or outcome.status}")
+    verification_mod.mark_reverted(conn, verification_id, outcome.commit or "")
+    typer.secho(f"reverted {item['merge_commit'][:8]} on {integration_mod.BRANCH}",
+                fg=typer.colors.GREEN)
+
+
+@integration_app.command("review")
+def integration_review(
+    required: bool = typer.Option(
+        None, "--required/--not-required",
+        help="Whether a second model must approve a change before it merges.",
+    ),
+    reviewer: str = typer.Option(None, "--reviewer", help="Preferred reviewer worker."),
+):
+    """Show or change the second-model review requirement."""
+    conn = _conn()
+    if required is not None:
+        review_mod.set_required(conn, required)
+    if reviewer:
+        settings_mod.set_value(conn, review_mod.REVIEWER_KEY, reviewer.strip().lower())
+    typer.echo(
+        f"Second-model review: {'required' if review_mod.is_required(conn) else 'not required'}"
+    )
+    typer.echo(
+        f"Preferred reviewer: {settings_mod.get(conn, review_mod.REVIEWER_KEY) or 'auto'}"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

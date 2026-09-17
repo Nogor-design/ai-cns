@@ -318,3 +318,63 @@ def test_github_link_resolves_exact_issue_and_enforces_configured_repository(
     )
     assert duplicate.exit_code == 1
     assert "already has a stable GitHub issue link" in duplicate.output
+
+
+# -- Phase 3: the integration branch and the gate ------------------------------
+
+def _gate_project(git_repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("CORTEX_WORK_ROOT", str(tmp_path / "work"))
+    assert _run("init", str(git_repo), "--name", "Gated").exit_code == 0
+    return "gated"
+
+
+def test_integration_status_before_anything_has_merged(git_repo, tmp_path, monkeypatch):
+    _gate_project(git_repo, tmp_path, monkeypatch)
+
+    result = _run("integration", "status")
+
+    assert result.exit_code == 0, result.output
+    assert "not created yet" in result.output
+    # The owner is told plainly that nothing merges on its own here yet.
+    assert "merges need the owner" in result.output
+
+
+def test_verify_a_write_run_from_the_cli(git_repo, tmp_path, monkeypatch):
+    from cortex import gitutil, integration, review, verification, worktrees
+
+    project_id = _gate_project(git_repo, tmp_path, monkeypatch)
+    conn = db.connect()
+    store.update_project(conn, project_id, autonomy_mode="integration")
+    task_id = store.create_task(
+        conn, project_id=project_id, title="Add the parser", type="code",
+        acceptance="parser.py exists",
+    )
+    integration.ensure(git_repo, project_id)
+    tree = worktrees.ensure(git_repo, project_id, task_id, base=integration.BRANCH)
+    before = gitutil.head(tree.path)
+    (tree.path / "parser.py").write_text("parse = True\n", encoding="utf-8")
+    run_id = store.create_run(
+        conn, task_id=task_id, project_id=project_id, model="codex:default",
+        execution_mode="headless_cli", git_before=before,
+    )
+    store.update_run(conn, run_id, workspace_path=str(tree.path), exit_code=0)
+    conn.close()
+    # No second model is installed in a test environment, so the requirement is
+    # turned off explicitly rather than pretended away.
+    assert _run("integration", "review", "--not-required").exit_code == 0
+
+    result = _run("integration", "verify", run_id)
+
+    assert result.exit_code == 0, result.output
+    assert "merged" in result.output
+    verification_id = result.output.split("verification ")[-1].strip()
+
+    shown = _run("integration", "show", verification_id)
+    assert "merge" in shown.output and "pass" in shown.output
+
+    reverted = _run("integration", "revert", verification_id)
+    assert reverted.exit_code == 0, reverted.output
+    assert "reverted" in reverted.output
+    conn = db.connect()
+    assert verification.get(conn, verification_id)["reverted_at"]
+    conn.close()

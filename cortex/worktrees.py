@@ -32,11 +32,17 @@ def ensure(
     repo = Path(repo)
     if not gitutil.is_repo(repo):
         raise WorktreeError(f"not a Git repository: {repo}")
-    dirty = gitutil.status_summary(repo)
-    if dirty.dirty:
+    # The owner's uncommitted work is a real reason to refuse; Cortex's own
+    # bookkeeping under .cortex/ is not. A scaffolded state.md that the project
+    # does not track would otherwise block every write run forever.
+    dirty = [
+        path for path in gitutil.dirty_paths(repo)
+        if not path.startswith(f"{config.CORTEX_DIR}/")
+    ]
+    if dirty:
         raise WorktreeError(
-            "canonical repository is dirty; checkpoint or commit it before a write run "
-            f"({dirty.modified} modified, {dirty.untracked} untracked)"
+            "canonical repository has uncommitted changes; commit or stash them "
+            f"before a write run ({len(dirty)}: {', '.join(dirty[:5])})"
         )
 
     branch = f"cortex/{project_id}/{task_id}"
