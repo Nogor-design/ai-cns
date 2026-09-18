@@ -222,7 +222,7 @@ schema v17 adds `verifications`):
   route the router did not mark high-risk or approval-requiring. Everything
   else, including every protected project, still waits for the owner.
 
-### Phase 4 — Skill scoreboard and token efficiency (measurement and ranking done)
+### Phase 4 — Skill scoreboard and token efficiency (exit criterion met)
 
 Built so far (`cortex/scoreboard.py`, `cortex scoreboard`):
 
@@ -239,9 +239,21 @@ Built so far (`cortex/scoreboard.py`, `cortex scoreboard`):
 - The owner's review-cost rule (cheap reviewer for small diffs, premium for
   large diffs and high-risk tasks) is applied in the gate.
 
-Still to build: cascades (local brief preparation, local first pass, escalate
-on a failed gate) and shared skill cards; then the A/B that is the exit
-criterion.
+- Cascade (`cortex/cascade.py`): a gate-rejected task goes up a strength ladder
+  instead of stalling -- at most two escalations, never to a worker that already
+  tried it, never past what the project allows, and never for an owner decision.
+  Which workers have tried a task is read back from the runs, not a counter.
+- Skill cards (`cortex/skills.py`): the gate's contract stated to every worker
+  before it starts, rendered into the brief and never written into a repository,
+  with a compact form for local models. The protected-file list is generated
+  from the gate's own list so the two cannot drift.
+- A/B harness (`cortex/ab.py`, `cortex ab`): one fixed task set, a copy per arm,
+  every number read back from the runs and verifications. Built to be able to
+  say no -- cheaper-but-less-accepted reports as worse, under 10% is even, and
+  an arm that accepted nothing is "not proven".
+
+Exit criterion met on 2026-09-18 (evidence in the phase log): 50.9% fewer
+tokens per accepted task with acceptance unchanged at 3/3.
 
 Scope: per (worker, model, task type) acceptance rate, tokens per accepted task,
 review pass rate, median time; ranking function (owner-authored weights);
@@ -357,6 +369,25 @@ database, dashboard alert thresholds.
   one owner action away. The project's autonomy mode was set to `integration`
   to attempt this and has been set back to `read_only`; five real low-risk
   tasks for this repository were left in the portfolio as open work.
+
+- 2026-09-18: Phase 4's exit criterion met by a real A/B on the textstats
+  scratch project, three tasks per arm, OpenCode Go producing in both.
+  Baseline (no skill cards, premium reviewer always) accepted 3/3 at 49,970
+  tokens per accepted task; candidate (skill cards on, tiered reviewer) accepted
+  3/3 at 24,513 -- **50.9% fewer tokens per accepted task with no drop in
+  acceptance**. `cortex ab` keeps the comparison.
+  Where the saving actually came from, since the A/B separates it cleanly:
+  telling the reviewer what the gate had already proved cut a premium review
+  from ~85k to ~27k input tokens (287k -> 82k across the arm), and the cheap
+  tier then cut the remaining 82k to 2.5k for these small diffs. The skill cards
+  cost about 4% *more* producer tokens (68.1k -> 71.0k) and saved nothing
+  measurable here, because neither arm produced a rejection for them to prevent;
+  their value is untested rather than demonstrated.
+  Two real defects surfaced during the runs and are fixed with regression tests:
+  the secrets scan read git's own `index e9582a2..5536435` metadata as a credit
+  card number and rejected a correct commit, and both reviewer tiers were
+  spending effort re-checking tests the gate had already run -- Codex by
+  repeating them, the local model by asserting they "would pass".
 
 ## 8. Phase 1 findings and follow-ups
 
@@ -478,3 +509,24 @@ database, dashboard alert thresholds.
 - Open: `refresh` reports `diverged` and stops. A project whose base branch
   moves while Cortex work sits unmerged will keep testing against older code
   until the owner merges the integration branch or rebases it by hand.
+
+## 12. Phase 4 findings and follow-ups
+
+- The biggest efficiency win was not a cheaper model, it was telling the
+  reviewer what had already been checked. A premium review fell by about 70%
+  from one paragraph of prompt. Look for that shape of saving before reaching
+  for a weaker model.
+- The A/B earned its keep by returning "worse" on its second run: the candidate
+  was 29.8% cheaper per accepted task and was still the wrong answer, because
+  acceptance had fallen from 3/3 to 2/3. A harness that cannot say no would have
+  reported a win and buried a real defect.
+- A cheap local reviewer approves on plausibility. Ollama's verdicts reasoned
+  that the tests "would pass" rather than checking anything; the gate had
+  already run them, so nothing unsafe followed, but a local review is weaker
+  independent judgement and should not be read as equal to a premium one.
+- Skill cards are not yet paying for themselves. On work that goes right they
+  are pure added prompt. The case for them rests on preventing the rejections
+  the 2026-09-17 runs produced, and that has not been reproduced under
+  measurement. Open: a task set that includes work an agent tends to get wrong.
+- Open: the ladder's strength order in `cascade.STRENGTH` is a judgement, not a
+  measurement. The scoreboard could rank it once enough escalations exist.

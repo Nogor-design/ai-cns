@@ -27,7 +27,9 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
-from . import verification
+from . import settings, verification
+
+ENABLED_KEY = "skills.cards"
 
 # Workers without repository tools, whose prompt is their whole world and whose
 # prefill cost is paid locally per token.
@@ -183,6 +185,15 @@ def render(
                 + ("." if compact else ", on your branch and again on the merged result.")
             )
     return "\n".join(lines).strip() + "\n"
+
+
+def is_enabled(conn: sqlite3.Connection) -> bool:
+    """Cards are on unless the owner turns them off (or an A/B arm does)."""
+    return settings.get_bool(conn, ENABLED_KEY, True)
+
+
+def set_enabled(conn: sqlite3.Connection, enabled: bool) -> None:
+    settings.set_value(conn, ENABLED_KEY, "1" if enabled else "0")
 
 
 def for_task(project: sqlite3.Row, task: sqlite3.Row, *, worker: str, action: str) -> str:

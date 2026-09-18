@@ -129,6 +129,25 @@ possible at all:
   one button to undo a merge.
 
 
+Phase 4 makes that work cheaper, and proves it rather than claiming it:
+
+- **`cortex scoreboard`** reports, per worker, model and task type: acceptance,
+  gate pass rate, review pass rate, median time and tokens per accepted task.
+  It never conflates passing the gate with your accepting the work, prints no
+  cost per accepted task when nothing was accepted, and marks any row under
+  five completed runs unproven.
+- **Cheapest proven wins.** Among workers with a real record on that kind of
+  task, the one costing least per accepted result takes the work. An explicit
+  assignee still wins and a tie falls back to the existing rules.
+- **Escalation.** A change the gate rejects moves up to a stronger worker
+  instead of stopping - twice at most, never for something that is your
+  decision. `cortex cascade <task>` shows the ladder.
+- **Skill cards.** Every worker is told how its change will be judged before it
+  starts, in its own idiom, rendered into the brief and never written into your
+  repository.
+- **`cortex ab`** compares two configurations over one fixed task set. Measured
+  2026-09-18: 50.9% fewer tokens per accepted task with acceptance unchanged.
+
 ## Which worker may see which repository
 
 Privacy is enforced in exactly one place: a per-project allowlist. It answers a

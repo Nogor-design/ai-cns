@@ -391,3 +391,74 @@ def test_a_high_risk_task_is_never_cheaply_reviewed(gated, conn):
     )
 
     assert seen["premium_required"] is True
+
+
+def test_the_reviewer_is_told_what_was_already_proved(gated, conn):
+    """Both tiers wasted effort re-checking what the gate had run itself."""
+    (gated["tree"].path / "feature.py").write_text("value = 1\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def record(*args, **kwargs):
+        seen.update(kwargs)
+        return review.ReviewOutcome("pass", "codex", "default", ("fine",))
+
+    verification.verify(
+        conn, gated["task"], project=gated["project"], workspace=gated["tree"].path,
+        before=gated["before"], producer="claude", review_fn=record, test_fn=_tests(True),
+    )
+
+    facts = seen["verified"]
+    assert any("allowed paths" in fact for fact in facts)
+    assert any("merged result" in fact for fact in facts)
+    prompt = review.build_prompt(
+        gated["task"], diff="+x\n", changed_files=["feature.py"],
+        producer="claude", verified=facts,
+    )
+    assert "do not re-check these" in prompt
+    assert "what those checks cannot see" in prompt.lower() or "Judge what those checks" in prompt
+
+
+def test_git_metadata_is_not_scanned_for_secrets(gated, conn):
+    """Found by a real A/B run: a blob hash read as a credit-card number.
+
+    `index e9582a2..5536435 100644` is git's own bookkeeping, not part of the
+    change, and scanning it rejected a correct commit for a secret that was
+    never there.
+    """
+    metadata = (
+        "diff --git a/tests/test_textstats.py b/tests/test_textstats.py\n"
+        "index e9582a2..5536435 100644\n"
+        "--- a/tests/test_textstats.py\n"
+        "+++ b/tests/test_textstats.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        "+def unique_words(text): return len(set(text.split()))\n"
+    )
+
+    content = verification._diff_content(metadata)
+
+    assert "5536435" not in content
+    assert "def unique_words" in content
+    assert verification.secrets_scan.scan(content, use_ollama=False) == []
+    # The same change, gated end to end, is not refused.
+    (gated["tree"].path / "unique.py").write_text(
+        "def unique_words(text):\n    return len(set(text.split()))\n", encoding="utf-8"
+    )
+    report = verification.verify(
+        conn, gated["task"], project=gated["project"], workspace=gated["tree"].path,
+        before=gated["before"], producer="claude", review_fn=_approve, test_fn=_tests(True),
+    )
+    assert report.status == "merged"
+
+
+def test_a_real_secret_in_the_content_is_still_caught(gated, conn):
+    (gated["tree"].path / "config.py").write_text(
+        'AWS_SECRET_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"\n', encoding="utf-8"
+    )
+
+    report = verification.verify(
+        conn, gated["task"], project=gated["project"], workspace=gated["tree"].path,
+        before=gated["before"], producer="claude", review_fn=_approve, test_fn=_tests(True),
+    )
+
+    assert report.status == "rejected"
+    assert next(c for c in report.checks if c.name == "secrets").status == verification.FAIL

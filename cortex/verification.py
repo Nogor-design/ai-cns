@@ -233,7 +233,7 @@ def verify(
 
     # 4. secrets in the diff itself
     diff = gitutil.diff_text(workspace, before, after)
-    findings = secrets_scan.scan(diff, use_ollama=False)
+    findings = secrets_scan.scan(_diff_content(diff), use_ollama=False)
     report.add(Check(
         "secrets",
         FAIL if findings else PASS,
@@ -305,6 +305,7 @@ def verify(
             verdict = review_fn(
                 conn, project, task, diff=diff, changed_files=changed,
                 producer=producer, workspace=workspace, unattended=unattended,
+                verified=_verified_facts(report),
                 # High-risk work is judged by a premium model whatever its
                 # size; the cheap tier is for small, ordinary changes.
                 premium_required=str(_task_field(task, "risk")).lower() == "high",
@@ -341,6 +342,25 @@ def verify(
 
     report.status = "merged"
     return _finish(conn, report, project, task)
+
+
+def _verified_facts(report: GateReport) -> tuple[str, ...]:
+    """What the gate has already proved, phrased for the reviewer."""
+    facts = []
+    for check in report.checks:
+        if check.status != PASS:
+            continue
+        if check.name == "path_scope":
+            facts.append("Every changed file is inside the task's allowed paths.")
+        elif check.name == "protected_files":
+            facts.append("No protected file was touched.")
+        elif check.name == "secrets":
+            facts.append("The diff was scanned for secrets and none were found.")
+        elif check.name == "task_tests":
+            facts.append(f"{check.detail} (run by Cortex, not claimed by the author).")
+        elif check.name == "merged_tests":
+            facts.append(f"{check.detail} - the tests also pass on the merged result.")
+    return tuple(facts)
 
 
 def _task_field(task: sqlite3.Row, name: str) -> str:
@@ -484,6 +504,23 @@ def _test_check(
         f"`{command}` {'passed' if passed == 1 else 'failed'} in {Path(workspace).name}",
         {"command": command, "passed": bool(passed)},
     )
+
+
+def _diff_content(diff: str) -> str:
+    """Only the lines the change actually adds or removes.
+
+    Git's own metadata is not part of anyone's change, and scanning it cost a
+    real, correct change its merge: the blob hashes in `index e9582a2..5536435`
+    matched the credit-card pattern, and the run was rejected for leaking a
+    secret it did not contain.
+    """
+    lines = []
+    for line in diff.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith(("+", "-")):
+            lines.append(line[1:])
+    return "\n".join(lines)
 
 
 def _merge_base(workspace: Path, branch: str) -> str | None:

@@ -26,6 +26,7 @@ from typing import Any
 from . import capacity, config, lanes, policy, routing, settings, workers
 
 REVIEWER_KEY = "verification.reviewer"
+TIER_KEY = "verification.review_tier"
 REQUIRED_KEY = "verification.review"
 DEFAULT_TIMEOUT = 900
 
@@ -43,6 +44,20 @@ SMALL_DIFF_LINES = 200
 
 # Every reviewer, best-first, used when no tier applies.
 PREFERENCE: tuple[str, ...] = (*PREMIUM, "opencode", "opencode-local", "ollama")
+
+
+def tier_setting(conn: sqlite3.Connection) -> str:
+    """``tiered`` (the owner's 2026-09-18 decision) or ``premium`` for always-best."""
+    value = (settings.get(conn, TIER_KEY) or "tiered").strip().lower()
+    return value if value in {"tiered", "premium"} else "tiered"
+
+
+def set_tier(conn: sqlite3.Connection, tier: str) -> str:
+    value = tier.strip().lower()
+    if value not in {"tiered", "premium"}:
+        raise ValueError("review tier must be 'tiered' or 'premium'")
+    settings.set_value(conn, TIER_KEY, value)
+    return value
 
 
 def tier_for(diff: str, *, premium_required: bool) -> tuple[str, ...]:
@@ -157,8 +172,15 @@ def build_prompt(
     diff: str,
     changed_files: list[str],
     producer: str,
+    verified: tuple[str, ...] = (),
 ) -> str:
-    """A self-contained review brief: the criteria, the change, the contract."""
+    """A self-contained review brief: the criteria, the change, the contract.
+
+    ``verified`` lists what the gate has already established mechanically. Both
+    tiers of reviewer wasted effort on it otherwise: Codex re-ran the tests it
+    was told nothing about, and a local model simply asserted that the tests
+    "would pass". Neither is the judgement being paid for.
+    """
     acceptance = _field(task, "acceptance").strip() or (
         "No explicit acceptance criteria were recorded. Judge the change against "
         "the task description alone, and fail it if you cannot tell what it was "
@@ -176,6 +198,13 @@ def build_prompt(
         acceptance,
         "",
         f"## Produced by: {producer}",
+        "",
+        "## Already checked mechanically by Cortex - do not re-check these",
+        "\n".join(f"- {fact}" for fact in verified)
+        or "- (nothing; judge the change on its own)",
+        "Judge what those checks cannot see: whether the change actually does what",
+        "the acceptance criteria ask, and whether it is correct and safe to merge.",
+        "",
         f"## Files changed ({len(changed_files)})",
         "\n".join(f"- {path}" for path in changed_files[:100]) or "(none)",
         "",
@@ -209,6 +238,7 @@ def run(
     changed_files: list[str],
     producer: str,
     workspace: str | Path,
+    verified: tuple[str, ...] = (),
     unattended: bool = True,
     premium_required: bool = False,
     timeout: int = DEFAULT_TIMEOUT,
@@ -222,7 +252,10 @@ def run(
 
     chosen = choose_reviewer(
         conn, project, exclude=producer, unattended=unattended,
-        order=tier_for(diff, premium_required=premium_required),
+        order=tier_for(
+            diff,
+            premium_required=premium_required or tier_setting(conn) == "premium",
+        ),
     )
     if chosen is None:
         return ReviewOutcome(
@@ -233,7 +266,10 @@ def run(
             ),
         )
     reviewer, model = chosen
-    prompt = build_prompt(task, diff=diff, changed_files=changed_files, producer=producer)
+    prompt = build_prompt(
+        task, diff=diff, changed_files=changed_files, producer=producer,
+        verified=verified,
+    )
     prompt_path = config.run_root() / task["id"] / "review.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
