@@ -21,6 +21,7 @@ from pathlib import Path
 import typer
 
 from . import (
+    ab as ab_mod,
     autonomy,
     brief as brief_mod,
     capacity,
@@ -41,6 +42,7 @@ from . import (
     project_blueprints,
     project_registration,
     overlap as overlap_mod,
+    cascade as cascade_mod,
     review as review_mod,
     scoreboard as scoreboard_mod,
     routing as routing_mod,
@@ -2194,6 +2196,65 @@ def scoreboard_command(
 
 def _pct(value: float | None) -> str:
     return "-" if value is None else f"{round(value)}%"
+
+
+@app.command("cascade")
+def cascade_command(
+    task_id: str = typer.Argument(..., help="Task to show the attempt ladder for."),
+):
+    """Every attempt at a task, what the gate made of it, and what is next."""
+    conn = _conn()
+    try:
+        task = store.get_task(conn, task_id)
+    except store.NotFound as exc:
+        _err(str(exc))
+    project = store.get_project(conn, task["project_id"])
+    rows = cascade_mod.history(conn, task_id)
+    if not rows:
+        typer.echo("No attempts yet.")
+    for row in rows:
+        typer.echo(
+            f"{row['started_at'][:16].replace('T', ' ')}  {str(row['worker']):<16}"
+            f"{str(row['gate_status'] or 'not gated'):<12}"
+            + (f"merged {row['merge_commit'][:8]}" if row["merge_commit"] else "")
+        )
+    last = rows[-1]["worker"] if rows else None
+    if last:
+        rung = cascade_mod.next_rung(conn, project, task, after=last)
+        typer.echo("")
+        typer.echo(
+            f"Next if the gate rejects it again: {rung.worker} (attempt {rung.attempt})"
+            if rung else
+            "The ladder is finished; another rejection is yours to look at."
+        )
+
+
+@app.command("ab")
+def ab_command(
+    show: bool = typer.Option(True, "--show/--no-show", help="Print past comparisons."),
+    limit: int = typer.Option(5, "--limit", min=1, max=20),
+):
+    """Past A/B comparisons of tokens per accepted task."""
+    conn = _conn()
+    if not show:
+        return
+    rows = ab_mod.latest(conn, limit=limit)
+    if not rows:
+        typer.echo(
+            "No comparison recorded yet. An A/B runs a fixed task set twice, once per "
+            "configuration; see cortex/ab.py."
+        )
+        return
+    for row in rows:
+        typer.secho(f"{row['at'][:16].replace('T', ' ')}  {row['summary']}", bold=True)
+        for arm in ("baseline", "candidate"):
+            data = row.get(arm) or {}
+            typer.echo(
+                f"  {arm:<10}{data.get('tasks', 0):>3} tasks  "
+                f"{data.get('accepted', 0):>3} accepted  "
+                f"{data.get('total_tokens', 0):>9} tokens  "
+                f"{data.get('tokens_per_accepted') or '-':>8} per accepted"
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover
