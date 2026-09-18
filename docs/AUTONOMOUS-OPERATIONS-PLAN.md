@@ -186,7 +186,7 @@ Still open from the same request, deliberately deferred:
   tokens and need the owner's framing, so this stays a deliberate action rather
   than something the scheduler does on its own.
 
-### Phase 3 — Verification gates and integration auto-merge (implemented; real tasks pending)
+### Phase 3 — Verification gates and integration auto-merge (implemented; exit met off owner code)
 
 Scope: write tasks run in isolated worktrees branched from `cortex/integration`;
 gate = task tests pass, project test command passes on the merged result, path
@@ -310,6 +310,33 @@ database, dashboard alert thresholds.
   project the owner has put in `integration` mode, and the live portfolio has
   no approved write work waiting.
 
+- 2026-09-18: Phase 3's exit criterion met against real agent runs, on a
+  scratch repository rather than owner code (see below for why). OpenCode Go
+  (DeepSeek V4.1 Flash) produced every change and Codex reviewed every one,
+  read-only, returning a real `VERDICT:` line with a substantive reason each
+  time. Five distinct tasks were judged: a new `sentence_count` helper
+  (merged), punctuation-stripping in `longest_word` (merged, then reverted
+  through `cortex integration revert` -- only that change disappeared, the
+  later merge stayed, the branch was clean and its tests still passed), README
+  documentation (merged), a GitHub Actions workflow (`needs_owner`: protected
+  file, filed to the inbox), and a helper whose task scope allowed only the
+  test file (rejected on path scope, filed to the inbox). Merges stack: each
+  task branch was cut from the integration branch carrying the previous merge.
+  Review cost 54k-90k input tokens (mostly cached) and 135-224 output tokens
+  per review.
+  The first four attempts failed and found three real defects -- a stale base
+  branch, a reviewer chosen from an always-cold probe cache, and a prompt
+  reading a task column that does not exist, which crashed *after* merging and
+  left the branch advanced with nothing recorded. All three are fixed with
+  regression tests (commit 42f727e); 366 Python and 42 dashboard tests pass.
+  Why not owner code: `cortex-portfolio-control-plane` is blocked by
+  `assert_execution_ready` -- its blueprint has sat in `review` since
+  2026-08-17, which is the owner's decision to finish, not Cortex's -- and
+  `seagate-demo` has uncommitted files and sits on a `codex/` branch. Both are
+  one owner action away. The project's autonomy mode was set to `integration`
+  to attempt this and has been set back to `read_only`; five real low-risk
+  tasks for this repository were left in the portfolio as open work.
+
 ## 8. Phase 1 findings and follow-ups
 
 - OpenCode Go spend is read only from this machine's opencode database, and its
@@ -415,6 +442,18 @@ database, dashboard alert thresholds.
   sits between them because a conflict makes a review pointless.
 - Open: the integration branch is never merged onward. Phase 5 or the owner
   decides when `cortex/integration` reaches `main`, and nothing here pushes.
+- Real runs found what synthetic ones could not, and all three were in the
+  seams rather than the logic: where the task branch is cut from, which probe
+  the reviewer choice uses, and what happens when the gate itself raises. The
+  last was the worst -- an exception between the merge and the verdict left an
+  unjudged merge on the branch and no record of it. Everything after the merge
+  now rewinds the branch and records an `error` verification.
+- Every gate test stubbed the reviewer, so `build_prompt` was never run against
+  a real task row until a live run crashed on it. A stubbed collaborator needs
+  at least one test that exercises the real thing.
+- Codex passed a README whose usage example imports `from textstats import ...`
+  where the module is `src/textstats.py`. The review is a real check, not a
+  proof; the owner still reads what merged.
 - Open: `refresh` reports `diverged` and stops. A project whose base branch
   moves while Cortex work sits unmerged will keep testing against older code
   until the owner merges the integration branch or rebases it by hand.
