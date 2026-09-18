@@ -159,7 +159,7 @@ def safe_start_candidates(
             continue
         if row["status"] != "assigned" or project["status"] != "active":
             continue
-        route = routing.effective_route(project, row)
+        route = dispatcher.with_scoreboard(conn, project, row, routing.effective_route(project, row))
         if route.blocked_reason:
             continue
         # Unattended writes became possible in Phase 3, but only where the

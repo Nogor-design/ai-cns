@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import ids, team
+from . import ids, policy
 
 # Below this many completed runs, a rate is an anecdote. Chosen to be small
 # enough to say something on a young portfolio and large enough that one lucky
@@ -113,6 +113,13 @@ class Cell:
         }
 
 
+def _usage_totals(usage: Any) -> dict[str, int]:
+    """Parse a run's usage envelope. Imported late so ``team`` may import us."""
+    from . import team
+
+    return team.usage_totals([{"usage_json": usage}])
+
+
 def cells(
     conn: sqlite3.Connection, *, since_days: int | None = None, task_type: str | None = None
 ) -> list[Cell]:
@@ -153,7 +160,7 @@ def cells(
             cell.succeeded += 1
         if row["outcome"] in ACCEPTED_OUTCOMES:
             cell.accepted += 1
-        usage = team.usage_totals([{"usage_json": row["usage_json"]}])
+        usage = _usage_totals(row["usage_json"])
         cell.input_tokens += usage["input_tokens"]
         cell.output_tokens += usage["output_tokens"]
         cell.cached_tokens += usage["cached_tokens"]
@@ -199,7 +206,7 @@ def review_overhead(conn: sqlite3.Connection, *, since_days: int | None = None) 
             reviewer, {"reviews": 0, "input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
         )
         entry["reviews"] += 1
-        usage = team.usage_totals([{"usage_json": evidence.get("usage")}])
+        usage = _usage_totals(evidence.get("usage"))
         for key in ("input_tokens", "output_tokens", "cached_tokens"):
             entry[key] += usage[key]
     return {
@@ -250,6 +257,42 @@ def best_for(
         if cell.proven and cell.tokens_per_accepted is not None
     ]
     return min(candidates, key=lambda cell: cell.tokens_per_accepted) if candidates else None
+
+
+def cheapest_proven(
+    conn: sqlite3.Connection,
+    project: Any,
+    task_type: str,
+    *,
+    action: str,
+    exclude: tuple[str, ...] = (),
+) -> Cell | None:
+    """The owner's ranking rule: lowest tokens per accepted task, proven only.
+
+    Owner decision 2026-09-18. Deliberately one measure rather than a weighted
+    score, and deliberately blind to anything with fewer than ``PROVEN_AFTER``
+    completed runs, so a single lucky cheap run cannot take over a task type.
+    A worker the project does not allow is never proposed, and a tie is left to
+    the existing rules rather than broken arbitrarily.
+    """
+    if action == "research":
+        # Sourced research has one specialist and no substitute worth ranking.
+        return None
+    candidates = [
+        cell for cell in cells(conn, task_type=task_type)
+        if cell.proven
+        and cell.tokens_per_accepted is not None
+        and cell.worker not in exclude
+        and policy.is_allowed(project, cell.worker)
+    ]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda cell: cell.tokens_per_accepted)
+    cheapest = [
+        cell for cell in candidates
+        if cell.tokens_per_accepted == best.tokens_per_accepted
+    ]
+    return best if len(cheapest) == 1 else None
 
 
 def _gate_results(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:

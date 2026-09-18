@@ -24,6 +24,8 @@ on provider websites. Local models share one 12 GB GPU.
 | Unattended starts of paid turns | **Allowed** for Codex and Claude (subscription token limits, no per-call spend). Other subscription CLIs follow the same rule. |
 | Quota reserve | Adjustable in the dashboard. **Default 30%** held back for the owner's interactive use. |
 | Auto-merge | Allowed into a per-project `cortex/integration` branch only, behind the gates in Phase 3. Never `main`/`master`, never a push. |
+| Worker ranking (Phase 4) | **Cheapest proven wins**: among workers with at least five completed runs of that task type, the lowest tokens per accepted result takes the work. A tie falls back to the existing rules; an explicit assignee always wins. Decided 2026-09-18. |
+| Second-model review cost | **Tiered**: a small diff is reviewed by a local or cheap model, a large one or any high-risk task by a premium model. Decided 2026-09-18 after Codex spent more reviewing three changes than OpenCode Go spent making ten. |
 | Trading repositories | **Excluded** from all unattended work. |
 | Apollo | **Excluded** from all unattended work (production application; owner monitors everything). |
 
@@ -220,7 +222,26 @@ schema v17 adds `verifications`):
   route the router did not mark high-risk or approval-requiring. Everything
   else, including every protected project, still waits for the owner.
 
-### Phase 4 — Skill scoreboard and token efficiency
+### Phase 4 — Skill scoreboard and token efficiency (measurement and ranking done)
+
+Built so far (`cortex/scoreboard.py`, `cortex scoreboard`):
+
+- Per (worker, model, task type): acceptance, gate pass rate, review pass rate,
+  median duration and tokens per accepted task. Passing the gate and being
+  accepted by the owner are reported separately and never averaged; a cost per
+  accepted task is `None` rather than a number when nothing was accepted; and
+  every rate carries its sample, with rows under five completed runs marked
+  unproven.
+- Reviewer tokens are charged to the reviewer, not the worker whose change was
+  reviewed, so a cheap implementer is not made to look expensive.
+- The owner's ranking rule (cheapest proven wins) is applied in dispatch and in
+  the scheduler's candidate selection, and writes its reason into the route.
+- The owner's review-cost rule (cheap reviewer for small diffs, premium for
+  large diffs and high-risk tasks) is applied in the gate.
+
+Still to build: cascades (local brief preparation, local first pass, escalate
+on a failed gate) and shared skill cards; then the A/B that is the exit
+criterion.
 
 Scope: per (worker, model, task type) acceptance rate, tokens per accepted task,
 review pass rate, median time; ranking function (owner-authored weights);

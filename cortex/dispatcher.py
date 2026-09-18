@@ -12,8 +12,8 @@ from pathlib import Path
 from . import brief as brief_mod
 from . import (
     autonomy, capacity, config, evidence, gitutil, ids, integration, lanes, policy,
-    routing, model_catalog, runlog, runs, secrets_scan, project_blueprints, store,
-    supervisor, trading_guard, verification, workers, worktrees,
+    routing, model_catalog, runlog, runs, scoreboard, secrets_scan, project_blueprints,
+    store, supervisor, trading_guard, verification, workers, worktrees,
 )
 
 SCHEDULER = "scheduler"
@@ -77,6 +77,7 @@ def preview(
             routing.effective_route(project, task),
             None, model_override, action_override,
         )
+        route = with_scoreboard(conn, project, task, route)
     route = _with_owner_defaults(conn, route, task, model_override, action_override)
     compiled = brief_mod.compile_brief(
         conn,
@@ -374,6 +375,40 @@ def _gate_tests(gate: verification.GateReport | None) -> int | None:
         if check and check.status in {verification.PASS, verification.FAIL}:
             return 1 if check.status == verification.PASS else 0
     return None
+
+
+def with_scoreboard(
+    conn: sqlite3.Connection,
+    project: sqlite3.Row,
+    task: sqlite3.Row,
+    route: routing.Route,
+) -> routing.Route:
+    """Let measured cost pick the worker where the evidence is strong enough.
+
+    Owner decision 2026-09-18: among workers with a proven record on this kind
+    of task, the cheapest per accepted result takes the work. An explicit
+    assignee is an instruction and still wins, an unproven or tied table
+    changes nothing, and the swap is written into the route's reasons so the
+    dashboard can say why it is not the rule-based choice.
+    """
+    assignee = task["assignee"] if "assignee" in task.keys() else None
+    if assignee:
+        return route
+    cell = scoreboard.cheapest_proven(
+        conn, project, task["type"] or "other", action=route.action
+    )
+    if cell is None or cell.worker == route.worker:
+        return route
+    return replace(
+        route,
+        worker=cell.worker,
+        model=cell.model,
+        reasons=route.reasons + (
+            f"scoreboard: {cell.worker} completed {cell.completed} {task['type']} "
+            f"run(s) at {cell.tokens_per_accepted} tokens per accepted result, "
+            f"cheaper than {route.worker}",
+        ),
+    )
 
 
 def _with_owner_defaults(

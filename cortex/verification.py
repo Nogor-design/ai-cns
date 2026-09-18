@@ -305,6 +305,9 @@ def verify(
             verdict = review_fn(
                 conn, project, task, diff=diff, changed_files=changed,
                 producer=producer, workspace=workspace, unattended=unattended,
+                # High-risk work is judged by a premium model whatever its
+                # size; the cheap tier is for small, ordinary changes.
+                premium_required=str(_task_field(task, "risk")).lower() == "high",
             )
             report.add(Check(
                 "review",
@@ -338,6 +341,13 @@ def verify(
 
     report.status = "merged"
     return _finish(conn, report, project, task)
+
+
+def _task_field(task: sqlite3.Row, name: str) -> str:
+    try:
+        return str(task[name] or "")
+    except (IndexError, KeyError):
+        return ""
 
 
 def merge_allowed(project: sqlite3.Row) -> bool:

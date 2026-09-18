@@ -351,3 +351,43 @@ def test_a_crash_after_the_merge_rewinds_the_branch(gated, conn):
     assert "IndexError" in report.summary()
     assert verification.get(conn, report.verification_id)["status"] == "error"
     assert any(item["kind"] == "verification_rejected" for item in inbox.items(conn))
+
+
+def test_a_small_change_is_reviewed_by_a_cheap_model_first(conn, project, monkeypatch):
+    """Owner decision 2026-09-18: premium review only where it earns its cost."""
+    from cortex import workers
+
+    monkeypatch.setattr(workers, "_PROBE_CACHE", {})
+    monkeypatch.setattr(workers, "probe", lambda name, **kwargs: {"availability": "ready"})
+
+    small = "+one line\n"
+    large = "".join(f"+line {n}\n" for n in range(review.SMALL_DIFF_LINES + 1))
+
+    assert review.tier_for(small, premium_required=False)[0] in review.CHEAP
+    assert review.tier_for(large, premium_required=False)[0] in review.PREMIUM
+    # High risk overrides size: a one-line change to something dangerous still
+    # gets the better judge.
+    assert review.tier_for(small, premium_required=True)[0] in review.PREMIUM
+
+    assert review.choose_reviewer(
+        conn, project, exclude="codex", unattended=False,
+        order=review.tier_for(small, premium_required=False),
+    ) == ("ollama", "phi4:14b")
+
+
+def test_a_high_risk_task_is_never_cheaply_reviewed(gated, conn):
+    store.update_task(conn, gated["task"]["id"], risk="high")
+    (gated["tree"].path / "feature.py").write_text("value = 1\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def record(*args, **kwargs):
+        seen.update(kwargs)
+        return review.ReviewOutcome("pass", "codex", "default", ("fine",))
+
+    verification.verify(
+        conn, store.get_task(conn, gated["task"]["id"]), project=gated["project"],
+        workspace=gated["tree"].path, before=gated["before"], producer="claude",
+        review_fn=record, test_fn=_tests(True),
+    )
+
+    assert seen["premium_required"] is True

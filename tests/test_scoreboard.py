@@ -165,3 +165,81 @@ def test_a_window_excludes_older_runs(conn, project):
 
     assert scoreboard.cells(conn)[0].attempts == 2
     assert sum(cell.attempts for cell in scoreboard.cells(conn, since_days=7)) == 1
+
+
+# -- the owner's ranking rule --------------------------------------------------
+
+def _proven(conn, project, *, worker, model, tokens, runs=scoreboard.PROVEN_AFTER,
+            task_type="code"):
+    task_id = _task(conn, project, task_type=task_type)
+    for _ in range(runs):
+        _run(conn, project, task_id, worker=worker, model=model, outcome="accepted",
+             tokens=tokens)
+    return task_id
+
+
+def test_the_cheapest_proven_worker_takes_the_work(conn, project):
+    _proven(conn, project, worker="codex", model="default", tokens=(20_000, 500))
+    _proven(conn, project, worker="opencode", model="deepseek", tokens=(2_000, 100))
+
+    cell = scoreboard.cheapest_proven(conn, project, "code", action="implement")
+
+    assert cell is not None and cell.worker == "opencode"
+
+
+def test_an_unproven_bargain_does_not_win(conn, project):
+    _proven(conn, project, worker="codex", model="default", tokens=(20_000, 500))
+    _proven(conn, project, worker="ollama", model="phi4", tokens=(10, 1), runs=1)
+
+    cell = scoreboard.cheapest_proven(conn, project, "code", action="implement")
+
+    assert cell is not None and cell.worker == "codex"
+
+
+def test_a_tie_is_left_to_the_existing_rules(conn, project):
+    _proven(conn, project, worker="codex", model="default", tokens=(1_000, 100))
+    _proven(conn, project, worker="claude", model="sonnet", tokens=(1_000, 100))
+
+    assert scoreboard.cheapest_proven(conn, project, "code", action="implement") is None
+
+
+def test_a_worker_the_project_forbids_is_never_proposed(conn, project):
+    _proven(conn, project, worker="codex", model="default", tokens=(20_000, 500))
+    _proven(conn, project, worker="opencode", model="deepseek", tokens=(2_000, 100))
+    store.update_project(conn, project["id"], allowed_workers='["codex"]')
+    allowed = store.get_project(conn, project["id"])
+
+    cell = scoreboard.cheapest_proven(conn, allowed, "code", action="implement")
+
+    assert cell is not None and cell.worker == "codex"
+
+
+def test_sourced_research_is_left_alone(conn, project):
+    _proven(conn, project, worker="opencode", model="deepseek", tokens=(2_000, 100),
+            task_type="research")
+
+    assert scoreboard.cheapest_proven(conn, project, "research", action="research") is None
+
+
+def test_an_explicit_assignee_outranks_the_measurement(conn, project):
+    from cortex import dispatcher, routing
+
+    _proven(conn, project, worker="opencode", model="deepseek", tokens=(2_000, 100))
+    task_id = store.create_task(
+        conn, project_id=project["id"], title="Write the adapter", type="code",
+        complexity=8, risk="high",
+    )
+    task = store.get_task(conn, task_id)
+    route = routing.effective_route(project, task)
+
+    # With no assignee, the measured cheaper worker takes it and says why.
+    swapped = dispatcher.with_scoreboard(conn, project, task, route)
+    assert swapped.worker == "opencode"
+    assert any("scoreboard" in reason for reason in swapped.reasons)
+
+    store.update_task(conn, task_id, assignee="codex")
+    instructed = store.get_task(conn, task_id)
+    kept = dispatcher.with_scoreboard(
+        conn, project, instructed, routing.effective_route(project, instructed)
+    )
+    assert kept.worker == "codex"

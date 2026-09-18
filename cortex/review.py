@@ -29,11 +29,35 @@ REVIEWER_KEY = "verification.reviewer"
 REQUIRED_KEY = "verification.review"
 DEFAULT_TIMEOUT = 900
 
-# Reviewers in order of preference: strong general reasoners first, then the
-# cheap and local options, so a portfolio with one CLI installed still has one.
-PREFERENCE: tuple[str, ...] = (
-    "codex", "claude", "gemini", "grok", "agy", "opencode", "opencode-local", "ollama",
-)
+# Owner decision 2026-09-18: a small change does not need a premium reviewer.
+# Codex spent more tokens reviewing three changes than OpenCode Go spent making
+# ten, because it explores the repository even though the prompt already
+# carries the whole diff. Small diffs therefore go to a local or cheap model
+# first; anything large, or any high-risk task, still gets a premium one.
+PREMIUM: tuple[str, ...] = ("codex", "claude", "gemini", "grok", "agy")
+CHEAP: tuple[str, ...] = ("ollama", "opencode-local", "opencode")
+
+# Changed lines below which a review is a "small" one. A judgement, not a law:
+# roughly the size a person reads in one sitting without scrolling back.
+SMALL_DIFF_LINES = 200
+
+# Every reviewer, best-first, used when no tier applies.
+PREFERENCE: tuple[str, ...] = (*PREMIUM, "opencode", "opencode-local", "ollama")
+
+
+def tier_for(diff: str, *, premium_required: bool) -> tuple[str, ...]:
+    """The reviewer order for this change: cheap-first only when it is safe."""
+    if premium_required:
+        return PREFERENCE
+    changed = sum(
+        1 for line in diff.splitlines()
+        if (line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
+    )
+    if changed and changed <= SMALL_DIFF_LINES:
+        # Cheap first, but never *only* cheap: a machine with no local model
+        # still gets a review rather than a refusal.
+        return (*CHEAP, *PREMIUM)
+    return PREFERENCE
 
 _VERDICT = re.compile(r"^\s*VERDICT\s*[:=]\s*(pass|fail)\b", re.I | re.M)
 _REASON = re.compile(r"^\s*REASON\s*[:=]\s*(.+)$", re.I | re.M)
@@ -75,6 +99,7 @@ def choose_reviewer(
     exclude: str,
     preferred: str | None = None,
     unattended: bool = True,
+    order: tuple[str, ...] = PREFERENCE,
 ) -> tuple[str, str] | None:
     """Pick an eligible reviewer worker and model, or None if there is none.
 
@@ -86,7 +111,7 @@ def choose_reviewer(
     ordered = [
         name for name in (
             preferred or settings.get(conn, REVIEWER_KEY),
-            *PREFERENCE,
+            *order,
         ) if name
     ]
     seen: set[str] = set()
@@ -185,6 +210,7 @@ def run(
     producer: str,
     workspace: str | Path,
     unattended: bool = True,
+    premium_required: bool = False,
     timeout: int = DEFAULT_TIMEOUT,
     execute_fn: Any = None,
 ) -> ReviewOutcome:
@@ -194,7 +220,10 @@ def run(
     if not diff.strip():
         return ReviewOutcome("fail", reasons=("There is no diff to review.",))
 
-    chosen = choose_reviewer(conn, project, exclude=producer, unattended=unattended)
+    chosen = choose_reviewer(
+        conn, project, exclude=producer, unattended=unattended,
+        order=tier_for(diff, premium_required=premium_required),
+    )
     if chosen is None:
         return ReviewOutcome(
             "fail",
