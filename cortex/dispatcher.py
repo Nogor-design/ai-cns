@@ -13,7 +13,7 @@ from . import brief as brief_mod
 from . import (
     autonomy, capacity, config, evidence, gitutil, ids, integration, lanes, policy,
     routing, model_catalog, runlog, runs, scoreboard, secrets_scan, project_blueprints,
-    store, supervisor, trading_guard, verification, workers, worktrees,
+    skills, store, supervisor, trading_guard, verification, workers, worktrees,
 )
 
 SCHEDULER = "scheduler"
@@ -87,7 +87,13 @@ def preview(
         mode="manual",
         use_ollama=False,
     )
-    compiled_text = compiled.text
+    # Tell the worker how its change will be judged before it starts. The
+    # cards are rendered into the brief and never written into the repository:
+    # agent instruction files are protected precisely because they change how
+    # later runs behave.
+    compiled_text = compiled.text + "\n" + skills.for_task(
+        project, task, worker=route.worker, action=route.action
+    )
     if route.worker == "ollama":
         # Ollama cannot read the repository itself, so the relevant files are
         # inlined into its brief; the CLI workers open the workspace directly.
