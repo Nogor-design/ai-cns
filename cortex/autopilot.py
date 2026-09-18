@@ -33,8 +33,8 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    autonomy, capacity, config, db, dispatcher, ids, inbox, jobs, leases, routing,
-    settings, store, supervisor, team,
+    autonomy, capacity, cascade, config, db, dispatcher, ids, inbox, jobs, leases,
+    routing, settings, store, supervisor, team,
 )
 
 MAX_CONCURRENT_KEY = "autopilot.max_concurrent"
@@ -239,6 +239,9 @@ class Autopilot:
                 }
             jobs.finish(conn, job_id, status="done" if result.exit_code == 0 else "failed",
                         result=outcome, run_id=result.run_id)
+            rung = self._escalate(conn, task, result)
+            if rung:
+                outcome["escalated_to"] = rung.worker
             if result.exit_code != 0:
                 self._file_failure(conn, task, worker, result.run_id,
                                    f"{worker} exited with code {result.exit_code}.")
@@ -279,6 +282,28 @@ class Autopilot:
             run_started.set()
             watch.close()
             conn.close()
+
+    def _escalate(
+        self, conn: sqlite3.Connection, task: sqlite3.Row, result: Any
+    ) -> Any:
+        """Hand a gate-rejected task up the ladder instead of stalling it.
+
+        Only the gate's own verdict can trigger this: a run that simply failed
+        is a worker problem for the inbox, and an owner decision is nobody
+        else's to answer. Nothing starts here -- the task is queued, and the
+        next tick admits it under the usual checks or does not.
+        """
+        gate = result.verification if result.verification else None
+        if not gate or not cascade.should_escalate(gate.get("status")):
+            return None
+        project = store.get_project(conn, task["project_id"])
+        return cascade.escalate(
+            conn, project, task,
+            after=str(result.worker),
+            gate_status=gate.get("status"),
+            reason=str(gate.get("summary") or "")[:300],
+            run_id=result.run_id,
+        )
 
     def _file_failure(
         self, conn: sqlite3.Connection, task: sqlite3.Row, worker: str,
