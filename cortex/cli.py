@@ -42,6 +42,7 @@ from . import (
     project_registration,
     overlap as overlap_mod,
     review as review_mod,
+    scoreboard as scoreboard_mod,
     routing as routing_mod,
     runs as runs_mod,
     state as state_mod,
@@ -2146,6 +2147,53 @@ def integration_review(
     typer.echo(
         f"Preferred reviewer: {settings_mod.get(conn, review_mod.REVIEWER_KEY) or 'auto'}"
     )
+
+
+@app.command("scoreboard")
+def scoreboard_command(
+    since: int = typer.Option(None, "--since", help="Only count runs from the last N days."),
+    task_type: str = typer.Option(None, "--type", help="Only one kind of work."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the raw payload."),
+):
+    """What each worker costs per accepted task. Measurement only, no ranking."""
+    conn = _conn()
+    if as_json:
+        typer.echo(json.dumps(scoreboard_mod.payload(conn, since_days=since), indent=2))
+        return
+    rows = scoreboard_mod.cells(conn, since_days=since, task_type=task_type)
+    if not rows:
+        typer.echo("No runs recorded yet.")
+        return
+    typer.secho(
+        f"{'worker/model':<34}{'type':<10}{'runs':>5}{'acc%':>6}{'gate%':>7}"
+        f"{'rev%':>6}{'tok/acc':>9}{'med s':>7}",
+        bold=True,
+    )
+    for cell in rows:
+        name = f"{cell.worker}:{cell.model}"[:33]
+        typer.echo(
+            f"{name:<34}{cell.task_type:<10}{cell.attempts:>5}"
+            f"{_pct(cell.acceptance_rate):>6}{_pct(cell.gate_pass_rate):>7}"
+            f"{_pct(cell.review_pass_rate):>6}"
+            f"{(cell.tokens_per_accepted if cell.tokens_per_accepted else '-'):>9}"
+            f"{(cell.median_seconds if cell.median_seconds is not None else '-'):>7}"
+            + ("" if cell.proven else "  (unproven)")
+        )
+    overhead = scoreboard_mod.review_overhead(conn, since_days=since)
+    if overhead["reviewers"]:
+        typer.echo("")
+        typer.echo("Second-model review overhead (charged to the reviewer, not the author):")
+        for row in overhead["reviewers"]:
+            typer.echo(
+                f"  {row['reviewer']:<12}{row['reviews']:>4} review(s)  "
+                f"{row['input_tokens'] + row['output_tokens']:>9} tokens"
+            )
+    typer.echo("")
+    typer.secho(scoreboard_mod.payload(conn, since_days=since)["note"], fg=typer.colors.YELLOW)
+
+
+def _pct(value: float | None) -> str:
+    return "-" if value is None else f"{round(value)}%"
 
 
 if __name__ == "__main__":  # pragma: no cover
