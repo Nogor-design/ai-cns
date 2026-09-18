@@ -192,6 +192,13 @@ def verify(
         return _finish(conn, report, project, task)
     after = gitutil.head(workspace)
     report.task_branch = gitutil.branch(workspace)
+    # Judge what the merge would introduce, not what changed since this run
+    # started. A retried task reuses its worktree, so an earlier attempt's
+    # commit is already in it; comparing against the dispatch-time HEAD made
+    # that work invisible and the gate reported "no change" on a branch that
+    # plainly had one. The merge base with the integration branch is the same
+    # revision for a fresh worktree and the right one for a resumed branch.
+    before = _merge_base(workspace, integration.BRANCH) or before
     changed = _committed_files(workspace, before, after)
     if not changed or after == before:
         report.add(Check(
@@ -278,26 +285,45 @@ def verify(
         {"commit": outcome.commit, "base_state": refreshed, "base": workspace_int.base},
     ))
 
-    # 7. tests on the merged result
-    merged_tests = report.add(
-        _test_check("merged_tests", workspace_int.path, test_command, test_fn)
-    )
-
-    # 8. second-model review
-    if merged_tests.status == FAIL:
-        report.add(Check("review", SKIPPED, "not reviewed: the merged result fails its tests"))
-    else:
-        verdict = review_fn(
-            conn, project, task, diff=diff, changed_files=changed,
-            producer=producer, workspace=workspace, unattended=unattended,
+    # Steps 7 and 8 run with the merge already on the branch, so anything that
+    # goes wrong in them -- including a bug in the gate itself -- must rewind
+    # it. A real run crashed here after merging and left the branch advanced
+    # with nothing recorded, which is the one outcome this module must never
+    # produce.
+    try:
+        # 7. tests on the merged result
+        merged_tests = report.add(
+            _test_check("merged_tests", workspace_int.path, test_command, test_fn)
         )
+
+        # 8. second-model review
+        if merged_tests.status == FAIL:
+            report.add(
+                Check("review", SKIPPED, "not reviewed: the merged result fails its tests")
+            )
+        else:
+            verdict = review_fn(
+                conn, project, task, diff=diff, changed_files=changed,
+                producer=producer, workspace=workspace, unattended=unattended,
+            )
+            report.add(Check(
+                "review",
+                PASS if verdict.ok else FAIL,
+                (f"{verdict.reviewer or 'review'}: " + (
+                    "; ".join(verdict.reasons) or verdict.status))[:500],
+                verdict.as_dict(),
+            ))
+    except Exception as exc:  # the branch must not keep an unjudged merge
+        integration.rollback(workspace_int, base_before)
+        report.merge_commit = None
         report.add(Check(
-            "review",
-            PASS if verdict.ok else FAIL,
-            (f"{verdict.reviewer or 'review'}: " + (
-                "; ".join(verdict.reasons) or verdict.status))[:500],
-            verdict.as_dict(),
+            "gate", FAIL,
+            f"the gate failed after merging and the branch was rewound: "
+            f"{type(exc).__name__}: {exc}"[:500],
+            {"reset_to": base_before},
         ))
+        report.status = "error"
+        return _finish(conn, report, project, task)
 
     if report.blockers():
         integration.rollback(workspace_int, base_before)
@@ -322,7 +348,7 @@ def merge_allowed(project: sqlite3.Row) -> bool:
 def _finish(
     conn: sqlite3.Connection, report: GateReport, project: sqlite3.Row, task: sqlite3.Row
 ) -> GateReport:
-    if report.status not in {"merged", "verified"}:
+    if report.status not in {"merged", "verified", "error"}:
         report.status = "needs_owner" if any(
             check.status == OWNER for check in report.checks
         ) else "rejected"
@@ -349,7 +375,7 @@ def _finish(
             project_id=project["id"], task_id=task["id"], run_id=report.run_id,
             dedupe_key=f"gate:{report.verification_id}",
         )
-    elif report.status == "rejected":
+    elif report.status in {"rejected", "error"}:
         inbox.add(
             conn,
             kind="verification_rejected",
@@ -448,6 +474,12 @@ def _test_check(
         f"`{command}` {'passed' if passed == 1 else 'failed'} in {Path(workspace).name}",
         {"command": command, "passed": bool(passed)},
     )
+
+
+def _merge_base(workspace: Path, branch: str) -> str | None:
+    """The commit a task branch and the integration branch last shared."""
+    code, out, _ = gitutil._run(workspace, "merge-base", branch, "HEAD")
+    return out.strip() or None if code == 0 else None
 
 
 def _committed_files(workspace: Path, before: str | None, after: str | None) -> list[str]:

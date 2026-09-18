@@ -127,3 +127,24 @@ def test_status_reports_ahead_behind_and_merges(git_repo, tmp_path, monkeypatch)
     assert info["ahead"] == 2  # the work commit and its merge commit
     assert info["behind"] == 0
     assert info["merges"][0]["subject"] == "cortex: merge t1"
+
+
+def test_a_task_is_branched_from_a_refreshed_integration_branch(git_repo, tmp_path, monkeypatch):
+    """Found by a real run: a stale base cost a correct change its merge.
+
+    The integration branch had been created before the repository gained a
+    .gitignore, so the agent's own test run left .pyc files that the gate read
+    as changes outside the task's scope.
+    """
+    monkeypatch.setenv("CORTEX_WORK_ROOT", str(tmp_path / "work"))
+    integration.ensure(git_repo, "demo")
+
+    # The owner moves the base branch on after the integration branch exists.
+    (git_repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "-c", "user.email=o@x", "-c", "user.name=O", "commit", "-q", "-m", "ignore bytecode")
+
+    workspace = integration.base_for_task(git_repo, "demo")
+
+    assert (workspace.path / ".gitignore").exists()
+    assert gitutil.head(workspace.path) == gitutil.head(git_repo)

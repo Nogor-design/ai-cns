@@ -174,7 +174,7 @@ def dispatch(
         # the owner's main: an agent builds on what the gate has already
         # accepted, and its branch merges back into the same place.
         try:
-            base = integration.ensure(project["repo_path"], project["id"]).branch
+            base = integration.base_for_task(project["repo_path"], project["id"]).branch
             workspace = worktrees.ensure(
                 project["repo_path"], project["id"], task["id"], base=base
             ).path

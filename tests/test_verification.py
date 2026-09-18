@@ -246,3 +246,108 @@ def test_path_and_protected_matching_handles_globs():
         ["package-lock.json", ".claude/settings.json", "src/app.py"]
     )
     assert [item["path"] for item in protected] == ["package-lock.json", ".claude/settings.json"]
+
+
+def test_a_reviewer_is_found_in_a_fresh_process(conn, project, monkeypatch):
+    """Found by a real run: the gate had no reviewer on a ready machine.
+
+    The gate runs once, in its own process, so the non-blocking probe cache is
+    always cold there and reports every worker as "checking". Choosing a
+    reviewer has to ask for a real answer.
+    """
+    from cortex import workers
+
+    monkeypatch.setattr(workers, "_PROBE_CACHE", {})
+    monkeypatch.setattr(
+        workers, "probe",
+        lambda name, **kwargs: {"availability": "ready" if name == "codex" else "missing"},
+    )
+
+    assert review.choose_reviewer(
+        conn, project, exclude="opencode", unattended=False
+    ) == ("codex", "default")
+    # The producing worker is never its own reviewer, even when it is the only
+    # one ready.
+    monkeypatch.setattr(
+        workers, "probe",
+        lambda name, **kwargs: {"availability": "ready" if name == "opencode" else "missing"},
+    )
+    assert review.choose_reviewer(conn, project, exclude="opencode", unattended=False) is None
+
+
+def test_the_review_prompt_is_built_from_a_real_task_row(conn, project):
+    """Found by a real run: the prompt read a column tasks do not have.
+
+    Every gate test stubs the reviewer, so nothing exercised build_prompt
+    against an actual row until a live run crashed on it after eight checks
+    had already passed.
+    """
+    task_id = store.create_task(
+        conn, project_id=project["id"], title="Add a sentence_count helper",
+        type="code", brief="Add sentence_count(text) to src/textstats.py.",
+        acceptance="sentence_count counts . ! and ? endings.",
+    )
+    prompt = review.build_prompt(
+        store.get_task(conn, task_id), diff="--- a\n+++ b\n", 
+        changed_files=["src/textstats.py"], producer="opencode",
+    )
+
+    assert "Add a sentence_count helper" in prompt
+    assert "Add sentence_count(text) to src/textstats.py." in prompt
+    assert "sentence_count counts . ! and ? endings." in prompt
+    assert "Produced by: opencode" in prompt
+    assert "VERDICT: pass" in prompt
+
+
+def test_a_retried_task_is_judged_on_its_whole_branch(gated, conn):
+    """Found by a real run: a reused worktree made finished work invisible.
+
+    A task worktree survives a rejected attempt. On the retry the agent sees
+    its own earlier commit, correctly reports there is nothing left to do, and
+    the gate must still judge the branch against the integration branch rather
+    than against the revision this particular run started from.
+    """
+    tree = gated["tree"].path
+    (tree / "feature.py").write_text("value = 1\n", encoding="utf-8")
+    _git(tree, "add", "-A")
+    _git(tree, "-c", "user.email=a@b.c", "-c", "user.name=Agent", "commit", "-q", "-m", "earlier attempt")
+    resumed_head = gitutil.head(tree)
+
+    # The second run starts from the earlier attempt's commit and adds nothing.
+    report = verification.verify(
+        conn, gated["task"], project=gated["project"], workspace=tree,
+        before=resumed_head, producer="claude", review_fn=_approve, test_fn=_tests(True),
+    )
+
+    assert report.status == "merged"
+    changes = next(check for check in report.checks if check.name == "changes")
+    assert changes.evidence["files"] == ["feature.py"]
+    assert (gated["integration"].path / "feature.py").exists()
+
+
+def test_a_crash_after_the_merge_rewinds_the_branch(gated, conn):
+    """Found by a real run: a gate bug left an unjudged merge on the branch.
+
+    The reviewer step raised before any verdict existed. The merge stayed, no
+    verification was recorded, and the next run saw the work as already
+    integrated. Whatever fails after the merge, the branch goes back.
+    """
+    (gated["tree"].path / "feature.py").write_text("value = 1\n", encoding="utf-8")
+    head_before = gitutil.head(gated["integration"].path)
+
+    def explode(*args, **kwargs):
+        raise IndexError("No item with that key")
+
+    report = verification.verify(
+        conn, gated["task"], project=gated["project"], workspace=gated["tree"].path,
+        before=gated["before"], producer="claude", review_fn=explode, test_fn=_tests(True),
+    )
+
+    assert report.status == "error"
+    assert report.merge_commit is None
+    assert gitutil.head(gated["integration"].path) == head_before
+    assert not (gated["integration"].path / "feature.py").exists()
+    # The failure is recorded and surfaced, not swallowed.
+    assert "IndexError" in report.summary()
+    assert verification.get(conn, report.verification_id)["status"] == "error"
+    assert any(item["kind"] == "verification_rejected" for item in inbox.items(conn))

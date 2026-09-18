@@ -97,7 +97,12 @@ def choose_reviewer(
         seen.add(worker)
         if worker not in policy.ALL_WORKERS or not policy.is_allowed(project, worker):
             continue
-        if workers.probe_cached(worker)["availability"] != "ready":
+        # Blocking probe on purpose. The cached probe is for request paths
+        # that poll; the gate runs once in a fresh process, where that cache is
+        # always empty and every worker therefore reads as "checking". A real
+        # run failed exactly that way, with eight checks passed and no reviewer
+        # found on a machine where every CLI was installed and ready.
+        if workers.probe(worker)["availability"] != "ready":
             continue
         model = routing.DEFAULT_MODELS.get(worker, "default")
         if unattended and not _admitted(conn, worker, model):
@@ -113,6 +118,14 @@ def _admitted(conn: sqlite3.Connection, worker: str, model: str) -> bool:
     return capacity.admit(conn, worker).allowed
 
 
+def _field(task: sqlite3.Row, name: str) -> str:
+    """Read a task column that may not exist on an older row."""
+    try:
+        return str(task[name] or "")
+    except (IndexError, KeyError):
+        return ""
+
+
 def build_prompt(
     task: sqlite3.Row,
     *,
@@ -121,7 +134,7 @@ def build_prompt(
     producer: str,
 ) -> str:
     """A self-contained review brief: the criteria, the change, the contract."""
-    acceptance = (task["acceptance"] or "").strip() or (
+    acceptance = _field(task, "acceptance").strip() or (
         "No explicit acceptance criteria were recorded. Judge the change against "
         "the task description alone, and fail it if you cannot tell what it was "
         "supposed to do."
@@ -131,8 +144,8 @@ def build_prompt(
         "integration branch. You did not write it and you are not fixing it.",
         "Do not modify any file; read and judge only.",
         "",
-        f"## Task: {task['title']}",
-        (task["description"] or "").strip() or "(no description recorded)",
+        f"## Task: {_field(task, 'title')}",
+        _field(task, "brief").strip() or "(no brief recorded)",
         "",
         "## Acceptance criteria",
         acceptance,

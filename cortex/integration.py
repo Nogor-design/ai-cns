@@ -122,6 +122,22 @@ def refresh(workspace: Workspace) -> str:
     return "diverged"
 
 
+def base_for_task(repo: str | Path, project_id: str) -> Workspace:
+    """The integration branch a new write run should be cut from.
+
+    Ensuring the branch is not enough: it may have been created days ago, or
+    during an earlier attempt, and the owner has moved the base branch since.
+    A task branched from that stale point inherits none of the newer work --
+    including, as a real run found, a newer ``.gitignore``, so the agent's own
+    test run leaves build artifacts that the gate then reads as files changed
+    outside the task's scope. Fast-forwarding first is cheap and removes the
+    whole class of failure; a diverged branch is left alone as always.
+    """
+    workspace = ensure(repo, project_id)
+    refresh(workspace)
+    return workspace
+
+
 def merge(
     workspace: Workspace,
     source_branch: str,
